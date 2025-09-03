@@ -1,15 +1,13 @@
 # app.py
 # -------------------------------------------------------------------
-# Lee Excel "estilo matriz" (sin encabezados explícitos), detecta:
-#  - Problemática (Cadena de Resultados)
-#  - Línea de acción (#)
-#  - Acción (col 2), Indicador (col 3), Meta (col 4)
-# Filtra por "Municipalidad" (o la palabra clave que indiques)
-# Genera PDF con campos editables SOLO para "Resultado".
-# Portada con imagen + colores institucionales.
+# Lee Excel "tipo matriz" sin depender de encabezados fijos.
+# Encuentra dinámicamente: Problemática, Línea de acción, Acción, Indicador, Meta.
+# Genera PDF con único campo editable: "Resultado".
+# Usa una imagen local del repo para la portada (indicar ruta).
 # -------------------------------------------------------------------
 import io
-from typing import List, Dict, Optional
+import re
+from typing import List, Dict, Optional, Tuple
 
 import streamlit as st
 import pandas as pd
@@ -35,74 +33,140 @@ st.title("Generar PDF editable – Gobierno Local (Sembremos Seguridad)")
 
 st.markdown(
     """
-Cargá tu **Excel de la matriz** (como el que me compartiste). El sistema:
-1) Reconstruye **Problemática → Línea de acción → Acción → Indicador → Meta** leyendo por **bloques**.
-2) Filtra por líneas **municipales** (usando una palabra clave).
-3) Genera un **PDF** con **solo “Resultado”** como campo editable (lo demás queda fijo).
+Cargá tu **Excel de la matriz**. El sistema:
+1) Reconstruye **Problemática → Línea de acción → Acción → Indicador → Meta** escaneando todas las celdas.
+2) Detecta la fila de **encabezados** (*Acciones / Indicador / Meta*) aunque cambien de columna.
+3) (Opcional) filtra por líneas **municipales** con una palabra clave.
+4) Genera un **PDF** con **solo “Resultado”** como campo editable.
 """
 )
 
-# ------------------ Helpers ------------------
+# ------------------ Utils ------------------
 
 def _s(x) -> str:
     return "" if pd.isna(x) else str(x).strip()
 
-def parse_matriz(df: pd.DataFrame) -> pd.DataFrame:
+def find_header_cols(row_vals: List[str]) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     """
-    Interpreta la hoja con columnas Unnamed:1.. y filas con contenido tipo:
-      - "Cadena de Resultados: ...." en col1
-      - "Línea de acción #..." en col1
-      - Encabezados de sección como 'Actividades', 'Productos/Servicios', 'Efectos'
-      - Filas de contenido en col2 (acción), col3 (indicador), col4 (meta)
-    Devuelve un DataFrame con columnas: problematica, linea_accion, accion_estrategica, indicador, meta
+    Dada una fila (lista de strings), intenta detectar las columnas de:
+    Acciones (acción estratégica), Indicador, Meta.
+    Devuelve índices (c_accion, c_indic, c_meta) o None si no encuentra.
     """
-    # nombre columnas seguro por índice
-    c1, c2, c3, c4 = 1, 2, 3, 4   # Unnamed:1..4
+    c_acc = c_ind = c_meta = None
+    for idx, val in enumerate(row_vals):
+        v = val.lower()
+        if c_acc is None and ("accion" in v or "acción" in v):
+            c_acc = idx
+        if c_ind is None and "indicador" in v:
+            c_ind = idx
+        if c_meta is None and re.search(r"\bmeta(s)?\b", v):
+            c_meta = idx
+    return c_acc, c_ind, c_meta
+
+def parse_matriz_dynamic(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Parser dinámico:
+      - Busca celdas con 'Cadena de Resultados' y 'Línea de acción'.
+      - Detecta fila de encabezados (Acciones/Indicador/Meta) y sus columnas.
+      - Captura filas de contenido hasta que cambie de bloque o se vacíe.
+    Devuelve columnas: problematica, linea_accion, accion_estrategica, indicador, meta
+    """
+    nrows, ncols = df.shape
+    # Normalizar a strings
+    S = df.astype(str).where(~df.isna(), "")
+
+    registros: List[Dict] = []
     cur_problem = ""
     cur_linea   = ""
-    registros: List[Dict] = []
+    acc_c = ind_c = meta_c = None
 
-    for _, r in df.iterrows():
-        t1 = _s(r.iloc[c1]) if c1 < len(r) else ""
-        t2 = _s(r.iloc[c2]) if c2 < len(r) else ""
-        t3 = _s(r.iloc[c3]) if c3 < len(r) else ""
-        t4 = _s(r.iloc[c4]) if c4 < len(r) else ""
+    i = 0
+    while i < nrows:
+        row_vals = [_s(S.iat[i, j]) for j in range(ncols)]
+        row_concat = " | ".join(row_vals).lower()
 
-        # Detecta Cadena de Resultados
-        if t1.lower().startswith("cadena de resultados"):
-            # Extrae el texto luego de ': ' si existe
-            cur_problem = t1.split(":", 1)[-1].strip() if ":" in t1 else t1
+        # Detecta Problemática
+        found_prob = None
+        for j in range(ncols):
+            v = row_vals[j]
+            if v.lower().startswith("cadena de resultados"):
+                # texto después de ':'
+                found_prob = v.split(":", 1)[-1].strip() if ":" in v else v
+                break
+        if found_prob is not None:
+            cur_problem = found_prob
+            i += 1
             continue
 
         # Detecta Línea de acción
-        if t1.lower().startswith("línea de acción") or t1.lower().startswith("linea de accion"):
-            cur_linea = t1.strip()
+        found_linea = None
+        for j in range(ncols):
+            v = row_vals[j].lower()
+            if v.startswith("línea de acción") or v.startswith("linea de accion"):
+                found_linea = row_vals[j]
+                break
+        if found_linea is not None:
+            cur_linea = found_linea
+            # al cambiar de línea, “olvidar” mapeo de columnas para encontrarlas de nuevo si reaparecen más abajo
+            acc_c = ind_c = meta_c = None
+            i += 1
             continue
 
-        # Ignora filas de encabezados de sub-sección
-        if t1.lower() in {"causas", "actividades", "productos/servicios", "efectos", "impactos"}:
+        # Detecta encabezados Accion/Indicador/Meta en esta fila
+        if acc_c is None or ind_c is None or meta_c is None:
+            a, b, c = find_header_cols(row_vals)
+            if a is not None and b is not None and c is not None:
+                acc_c, ind_c, meta_c = a, b, c
+                i += 1
+                continue
+
+        # Si ya conocemos las columnas de contenido, leer filas de datos
+        if acc_c is not None and ind_c is not None and meta_c is not None:
+            acc_val  = row_vals[acc_c] if acc_c < ncols else ""
+            ind_val  = row_vals[ind_c] if ind_c < ncols else ""
+            meta_val = row_vals[meta_c] if meta_c < ncols else ""
+            hay_algo = any([acc_val, ind_val, meta_val])
+
+            # si la fila está vacía y no es encabezado ni títulos, terminar bloque de tabla
+            if not hay_algo:
+                i += 1
+                continue
+
+            # Guardar registro si tenemos una línea y/o problemática activa
+            if cur_problem or cur_linea:
+                registros.append({
+                    "problematica": cur_problem,
+                    "linea_accion": cur_linea,
+                    "accion_estrategica": acc_val,
+                    "indicador": ind_val,
+                    "meta": meta_val,
+                })
+            i += 1
             continue
 
-        # Filas de contenido: si hay algo en col2/col3/col4, se toma como (acción, indicador, meta)
-        # (Algunas matrices traen texto solo en t2; igual se captura)
-        hay_contenido = any([t2, t3, t4])
-        if hay_contenido and (cur_problem or cur_linea):
-            registros.append({
-                "problematica": cur_problem,
-                "linea_accion": cur_linea,
-                "accion_estrategica": t2,
-                "indicador": t3,
-                "meta": t4,
-            })
+        i += 1
 
-    return pd.DataFrame(registros)
+    # limpiar basura (filas totalmente vacías)
+    df_out = pd.DataFrame(registros)
+    if not df_out.empty:
+        df_out = df_out.replace({"None": "", "nan": ""})
+        df_out = df_out[~(df_out[["accion_estrategica","indicador","meta"]].fillna("").eq("").all(axis=1))]
+    return df_out
 
+def filtrar_municipal(df: pd.DataFrame, palabra_clave: str) -> pd.DataFrame:
+    if not palabra_clave.strip():
+        return df
+    kw = palabra_clave.lower()
+    mask = df.apply(lambda r: kw in (" ".join([str(x) for x in r.values])).lower(), axis=1)
+    return df[mask]
 
-def add_cover(c: canvas.Canvas, image_bytes: Optional[bytes]):
+# ------------------ PDF ------------------
+
+def add_cover_from_path(c: canvas.Canvas, image_path: Optional[str]):
     y_top = A4[1] - 2.5*cm
-    if image_bytes:
+    if image_path:
         try:
-            img = ImageReader(io.BytesIO(image_bytes))
+            img = ImageReader(image_path)
             iw, ih = img.getSize()
             max_w = A4[0] - 4*cm
             max_h = 7*cm
@@ -113,6 +177,7 @@ def add_cover(c: canvas.Canvas, image_bytes: Optional[bytes]):
             c.drawImage(img, x, y, width=w, height=h, preserveAspectRatio=True, mask='auto')
             y_top = y - 0.8*cm
         except Exception:
+            # sin imagen no rompemos
             pass
 
     c.setFillColor(AZUL_OSCURO)
@@ -124,7 +189,6 @@ def add_cover(c: canvas.Canvas, image_bytes: Optional[bytes]):
     c.setFillColor(NEGRO)
     c.drawCentredString(A4[0]/2, y_top-4.6*cm, "Sembremos Seguridad")
     c.showPage()
-
 
 def draw_header(c: canvas.Canvas, page_num: int, total_pages: int):
     c.setFillColor(AZUL_CLARO)
@@ -164,17 +228,15 @@ def wrap_text(c: canvas.Canvas, text: str, x: float, y: float, w: float, font="H
     return ty
 
 def section(c: canvas.Canvas, x: float, y: float, w: float, title: str, body: str) -> float:
-    # Cabecera
     c.setFillColor(AZUL_CLARO)
     c.rect(x, y-0.9*cm, w, 0.9*cm, fill=1, stroke=0)
     c.setFillColor(AZUL_OSCURO)
     c.setFont("Helvetica-Bold", 11)
     c.drawString(x+0.2*cm, y-0.6*cm, title)
-    # Cuerpo
     c.setFillColor(NEGRO)
     return wrap_text(c, body, x+0.2*cm, y-1.4*cm, w-0.4*cm)
 
-def ensure_space(c: canvas.Canvas, y: float, need: float, page: int, total: int) -> (float, int):
+def ensure_space(c: canvas.Canvas, y: float, need: float, page: int, total: int) -> Tuple[float, int]:
     if y - need < 2.8*cm:
         draw_footer(c)
         c.showPage()
@@ -182,12 +244,12 @@ def ensure_space(c: canvas.Canvas, y: float, need: float, page: int, total: int)
         return A4[1] - 3.6*cm, page+1
     return y, page
 
-def crear_pdf(regs: pd.DataFrame, header_img_bytes: Optional[bytes], filtro_txt: str) -> bytes:
+def crear_pdf(regs: pd.DataFrame, image_path: Optional[str]) -> bytes:
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
 
     # Portada
-    add_cover(c, header_img_bytes)
+    add_cover_from_path(c, image_path)
 
     # Páginas de contenido
     total_pages_est = 1 + max(1, len(regs))  # estimación simple
@@ -199,29 +261,24 @@ def crear_pdf(regs: pd.DataFrame, header_img_bytes: Optional[bytes], filtro_txt:
 
     idx = 1
     for _, r in regs.iterrows():
-        prob = r["problematica"]
-        lin  = r["linea_accion"]
-        acc  = r["accion_estrategica"]
-        ind  = r["indicador"]
-        meta = r["meta"]
+        prob = r.get("problematica", "")
+        lin  = r.get("linea_accion", "")
+        acc  = r.get("accion_estrategica", "")
+        ind  = r.get("indicador", "")
+        meta = r.get("meta", "")
 
-        # Problemática
         y, page = ensure_space(c, y, 3.0*cm, page, total_pages_est)
         y = section(c, x, y, w, "Cadena de Resultados / Problemática", prob)
 
-        # Línea
         y, page = ensure_space(c, y, 2.6*cm, page, total_pages_est)
         y = section(c, x, y, w, "Línea de acción", lin)
 
-        # Acción
         y, page = ensure_space(c, y, 2.6*cm, page, total_pages_est)
         y = section(c, x, y, w, "Acción Estratégica", acc)
 
-        # Indicador
         y, page = ensure_space(c, y, 2.6*cm, page, total_pages_est)
         y = section(c, x, y, w, "Indicador", ind)
 
-        # Meta
         y, page = ensure_space(c, y, 2.6*cm, page, total_pages_est)
         y = section(c, x, y, w, "Meta", meta)
 
@@ -252,55 +309,43 @@ def crear_pdf(regs: pd.DataFrame, header_img_bytes: Optional[bytes], filtro_txt:
 
 # ------------------ UI ------------------
 
-col1, col2 = st.columns([2,1])
-with col1:
-    excel_file = st.file_uploader("Subí tu Excel de la matriz", type=["xlsx", "xls"])
-with col2:
-    img_file = st.file_uploader("Imagen de portada (opcional)", type=["png", "jpg", "jpeg"])
-    filtro_palabra = st.text_input("Filtro para líneas municipales", "municip")
+with st.sidebar:
+    ruta_img = st.text_input("Ruta imagen portada (en tu repo)", value="assets/encabezado.png")
+    palabra_muni = st.text_input("Filtro municipal (vacío = sin filtrar)", value="municip")
 
-st.divider()
+excel_file = st.file_uploader("Subí tu Excel de la matriz", type=["xlsx", "xls"])
 
 if excel_file is None:
-    st.info("Cargá el Excel para comenzar.")
+    st.info("Cargá el Excel para comenzar. La imagen se toma de la ruta local que indiques en la barra lateral.")
     st.stop()
 
-# Lee la primera hoja
+# Leer (primera hoja)
 try:
-    df_raw = pd.read_excel(excel_file, engine="openpyxl")
+    df_raw = pd.read_excel(excel_file, engine="openpyxl", header=None)  # sin suponer encabezados
 except Exception as e:
     st.error(f"No se pudo leer el Excel: {e}")
     st.stop()
 
-# Parseo por bloques (sin depender de encabezados)
-regs = parse_matriz(df_raw)
+regs = parse_matriz_dynamic(df_raw)
 
 if regs.empty:
-    st.warning("No se detectaron bloques de datos (revisá que exista 'Cadena de Resultados' y 'Línea de acción #').")
-    st.stop()
-
-# Filtro municipal: aplica sobre todas las columnas concatenadas
-if filtro_palabra.strip():
-    kw = filtro_palabra.strip().lower()
-    mask = regs.apply(lambda r: kw in (" ".join([str(x) for x in r.values])).lower(), axis=1)
-    regs_filtrado = regs[mask]
+    st.warning("No se detectaron bloques. Verifica que existan celdas con 'Cadena de Resultados' y 'Línea de acción #', y que la fila de encabezados contenga 'Accion/Indicador/Meta'.")
 else:
-    regs_filtrado = regs
+    # Filtro municipal
+    regs_filtrado = filtrar_municipal(regs, palabra_muni) if palabra_muni else regs
+    st.subheader("Vista previa (líneas incluidas)")
+    st.dataframe(regs_filtrado, use_container_width=True)
 
-st.subheader("Vista previa (líneas incluidas)")
-st.dataframe(regs_filtrado, use_container_width=True)
+    if st.button("Generar PDF editable"):
+        pdf_bytes = crear_pdf(regs_filtrado, ruta_img if ruta_img else None)
+        st.success("PDF generado.")
+        st.download_button(
+            label="⬇️ Descargar PDF",
+            data=pdf_bytes,
+            file_name="Informe_Seguimiento_GobiernoLocal.pdf",
+            mime="application/pdf"
+        )
 
-# Generar PDF
-if st.button("Generar PDF editable"):
-    img_bytes = img_file.read() if img_file is not None else None
-    pdf_bytes = crear_pdf(regs_filtrado, img_bytes, filtro_palabra)
-    st.success("PDF generado.")
-    st.download_button(
-        label="⬇️ Descargar PDF",
-        data=pdf_bytes,
-        file_name="Informe_Seguimiento_GobiernoLocal.pdf",
-        mime="application/pdf"
-    )
 
 
 
