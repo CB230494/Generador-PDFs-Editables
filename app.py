@@ -1,4 +1,4 @@
-# app.py — Parser robusto + división por Indicador + arrastre de Acción + sólo Municipalidad
+# app.py — División por indicador + forward-fill (Acción/Meta/Líder) + numeración N, N.1, N.2… + sólo Municipalidad
 import io, re, unicodedata
 from typing import Dict, List, Optional
 from pathlib import Path
@@ -25,8 +25,9 @@ st.title("Generar PDF editable – Gobierno Local (Sembremos Seguridad)")
 
 st.markdown("""
 - Detecta por **contenido**: *Cadena de Resultados*, *Línea de acción #*, encabezados (Acciones, Indicador/Productos-Servicios, Meta/Efectos, Líder, Co-gestores).
-- **Divide** una acción en **múltiples fichas** (una por **Indicador**) y **arrastra** la *Acción Estratégica* aunque las filas siguientes vengan vacías.
+- **Divide** una acción en **múltiples fichas** (una por **Indicador**) y **arrastra** Acción/Meta/Líder dentro del bloque si vienen en celdas combinadas.
 - **Sólo** incluye fichas con **Líder municipal**.
+- Numeración: **Acción #N** (una ficha) o **Acción #N.1 / #N.2 / …** (si hay varias por la misma acción).
 - En el PDF: cada **Problemática** arranca **página nueva**; luego sus **Líneas** y **fichas**.
 - La portada se detecta automáticamente (archivos `imagen23.*`, `encabezado.*`, `portada.*`, `header.*`).
 """)
@@ -67,7 +68,7 @@ def es_muni(texto: str) -> bool:
     t = _norm(texto)
     return any(p in t for p in ["municip", "gobierno local", "alcald", "ayuntamiento"])
 
-# --- División por múltiples ítems ---
+# --- División por múltiples ítems en una sola celda ---
 ITEM_SEP_REGEX = re.compile(r"(?:\r?\n|;|\s*/\s*|\s*\|\s*|•|\u2022)", flags=re.UNICODE)
 
 def _split_items(text: str) -> List[str]:
@@ -99,6 +100,7 @@ def _align_lists(n: int, *lists: List[str]) -> List[List[str]]:
     return out
 
 def expand_action_row(base: Dict[str, str]) -> List[Dict[str, str]]:
+    """Si una celda trae varios indicadores, crea N filas (alineando meta/líder por índice)."""
     ind_parts  = _split_items(base.get("indicador", ""))
     meta_parts = _split_items(base.get("meta", ""))
     lid_parts  = _split_items(base.get("lider", ""))
@@ -126,9 +128,11 @@ def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
     S = df_raw.astype(str).where(~df_raw.isna(), "")
     nrows, ncols = S.shape
     current_problem, current_linea = "", ""
-    last_action = ""   # <- arrastramos la última Acción Estratégica no vacía
-    rows: List[Dict] = []
 
+    # forward-fill dentro del bloque
+    last_action, last_meta, last_lider, last_cog = "", "", "", ""
+
+    rows: List[Dict] = []
     i = 0
     while i < nrows:
         row_vals = [S.iat[i, j].strip() for j in range(ncols)]
@@ -143,6 +147,8 @@ def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
         hdr = find_header_in_row(row_vals)
         if hdr:
             i += 1
+            # reiniciar arrastres al entrar a una nueva tabla
+            last_action = last_meta = last_lider = last_cog = ""
             while i < nrows:
                 row_vals = [S.iat[i, j].strip() for j in range(ncols)]
 
@@ -162,28 +168,31 @@ def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
                 lid  = get(hdr.get("lider"))
                 cog  = get(hdr.get("cogestores"))
 
-                # si no vienen datos clave, termina el bloque
+                # fin del bloque si no hay datos clave
                 if not any([acc, ind, meta]):
                     break
 
-                # arrastrar Acción Estratégica si viene vacía en filas siguientes
+                # forward-fill por bloque
                 if acc: last_action = acc
-                acc_use = last_action
+                if meta: last_meta = meta
+                if lid:  last_lider = lid
+                if cog:  last_cog   = cog
 
                 base = {
                     "problematica": current_problem,
                     "linea_accion": current_linea,
-                    "accion_estrategica": acc_use,
+                    "accion_estrategica": last_action,
                     "indicador": ind,
-                    "meta": meta,
-                    "lider": lid,
-                    "cogestores": cog,
+                    "meta": last_meta,
+                    "lider": last_lider,
+                    "cogestores": last_cog,
                     "hoja": sheet_name,
                 }
                 rows.extend(expand_action_row(base))
                 i += 1
             continue
         i += 1
+
     return pd.DataFrame(rows)
 
 def parse_workbook(xls_bytes) -> pd.DataFrame:
@@ -270,13 +279,14 @@ def ensure_space(c, y, need, page, total):
         return A4[1]-3.6*cm, page+1
     return y, page
 
-def ficha_accion(c, x, y, w, idx, fila) -> float:
+def ficha_accion(c, x, y, w, label, fila) -> float:
+    """Tarjeta por Acción con Resultado editable."""
     c.setStrokeColor(BORDE); c.setFillColor(colors.white)
     c.rect(x, y-5.8*cm, w, 5.8*cm, fill=0, stroke=1)
 
     c.setFillColor(AZUL_CLARO); c.rect(x, y-0.9*cm, w, 0.9*cm, fill=1, stroke=0)
     c.setFillColor(AZUL_OSCURO); c.setFont("Helvetica-Bold", 11)
-    c.drawString(x+0.2*cm, y-0.6*cm, f"Acción #{idx}")
+    c.drawString(x+0.2*cm, y-0.6*cm, f"Acción #{label}")
 
     y_text = y-1.3*cm
     y_text = kv_item(c, x+0.2*cm, y_text, w-0.4*cm, "Acción Estratégica", fila.get("accion_estrategica",""))
@@ -295,8 +305,8 @@ def ficha_accion(c, x, y, w, idx, fila) -> float:
     c.setStrokeColor(BORDE)
     c.rect(x+0.2*cm, y_text-(alto+1.0*cm), w-0.4*cm, alto, fill=0, stroke=1)
     c.acroForm.textfield(
-        name=f"resultado_{idx}",
-        tooltip=f"Resultado acción {idx}",
+        name=f"resultado_{label}",
+        tooltip=f"Resultado acción {label}",
         x=x+0.25*cm, y=y_text-(alto+1.0*cm)+0.1*cm,
         width=w-0.5*cm, height=alto-0.2*cm,
         borderStyle="inset", borderWidth=1, forceBorder=True,
@@ -339,9 +349,15 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str]) 
             y = wrap_text(c, lin or "", x+0.2*cm, y, w-0.4*cm)
             y -= 0.3*cm
 
-            for idx, fila in gdf.iterrows():
-                y, page = ensure_space(c, y, 7.0*cm, page, total)
-                y = ficha_accion(c, x, y, w, idx+1, fila)
+            # --- Numeración por Acción: N, N.1, N.2… ---
+            acciones_order = list(dict.fromkeys(gdf["accion_estrategica"].fillna("").tolist()))
+            for n_acc, acc_name in enumerate(acciones_order, start=1):
+                sub = gdf[gdf["accion_estrategica"] == acc_name].reset_index(drop=True)
+                multi = len(sub) > 1
+                for j, fila in sub.iterrows():
+                    label = f"{n_acc}.{j+1}" if multi else f"{n_acc}"
+                    y, page = ensure_space(c, y, 7.0*cm, page, total)
+                    y = ficha_accion(c, x, y, w, label, fila)
 
         footer(c)
 
