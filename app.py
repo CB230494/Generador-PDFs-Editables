@@ -1,12 +1,15 @@
 # app.py
-# -------------------------------------------------------------------
-# Lee Excel "tipo matriz" sin depender de encabezados fijos.
-# Encuentra dinámicamente: Problemática, Línea de acción, Acción, Indicador, Meta.
-# Genera PDF con único campo editable: "Resultado".
-# Usa una imagen local del repo para la portada (indicar ruta).
-# -------------------------------------------------------------------
+# -------------------------------------------------------------
+# Lee Excel tipo matriz (sin header), detecta la fila de tabla:
+#  Acciones Estrategicas | Indicador | Meta | Líder Estratégico | Co-gestores
+# Reconstruye: Problemática y Línea de acción (arriba de la tabla).
+# Filtra SOLO filas con Líder Estratégico = Municipalidad (coincidencia flexible).
+# Genera PDF con colores institucionales y portada con imagen local del repo.
+# Único campo editable en el PDF: "Resultado".
+# -------------------------------------------------------------
 import io
 import re
+import unicodedata
 from typing import List, Dict, Optional, Tuple
 
 import streamlit as st
@@ -19,150 +22,158 @@ from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.lib.utils import ImageReader
 
-# ====== PALETA INSTITUCIONAL ======
+# ===== Paleta institucional =====
 AZUL_OSCURO = colors.HexColor("#1F4E79")
 AZUL_CLARO  = colors.HexColor("#DCEBF7")
 BORDE       = colors.HexColor("#9BBBD9")
 NEGRO       = colors.black
-
-# Flag de campo multilínea en AcroForm (bit 13)
-FF_MULTILINE = 4096
+FF_MULTILINE = 4096  # AcroForm bit flag para campos multilínea
 
 st.set_page_config(page_title="PDF editable – Seguimiento GL", layout="wide")
 st.title("Generar PDF editable – Gobierno Local (Sembremos Seguridad)")
 
 st.markdown(
     """
-Cargá tu **Excel de la matriz**. El sistema:
-1) Reconstruye **Problemática → Línea de acción → Acción → Indicador → Meta** escaneando todas las celdas.
-2) Detecta la fila de **encabezados** (*Acciones / Indicador / Meta*) aunque cambien de columna.
-3) (Opcional) filtra por líneas **municipales** con una palabra clave.
-4) Genera un **PDF** con **solo “Resultado”** como campo editable.
+Carga tu **Excel de la matriz**. El sistema:
+1) Ubica la **tabla** (fila con *Acciones Estrategicas / Indicador / Meta / Líder Estratégico / Co-gestores*).  
+2) Reconstruye **Problemática** (*Cadena de Resultados: ...*) y **Línea de acción #...** desde las filas superiores.  
+3) Toma **Acción**, **Indicador**, **Meta** y **Líder** de la tabla.  
+4) Incluye **solo filas municipales** y genera un **PDF** con **“Resultado”** como **único campo editable**.
 """
 )
 
-# ------------------ Utils ------------------
+# ---------------- Utils ----------------
+def _norm(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s).strip().lower()
+    # quitar acentos para comparar de forma robusta
+    s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+    return s
 
-def _s(x) -> str:
-    return "" if pd.isna(x) else str(x).strip()
-
-def find_header_cols(row_vals: List[str]) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+def buscar_fila_encabezados(df: pd.DataFrame) -> Tuple[int, Dict[str,int]]:
     """
-    Dada una fila (lista de strings), intenta detectar las columnas de:
-    Acciones (acción estratégica), Indicador, Meta.
-    Devuelve índices (c_accion, c_indic, c_meta) o None si no encuentra.
-    """
-    c_acc = c_ind = c_meta = None
-    for idx, val in enumerate(row_vals):
-        v = val.lower()
-        if c_acc is None and ("accion" in v or "acción" in v):
-            c_acc = idx
-        if c_ind is None and "indicador" in v:
-            c_ind = idx
-        if c_meta is None and re.search(r"\bmeta(s)?\b", v):
-            c_meta = idx
-    return c_acc, c_ind, c_meta
-
-def parse_matriz_dynamic(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Parser dinámico:
-      - Busca celdas con 'Cadena de Resultados' y 'Línea de acción'.
-      - Detecta fila de encabezados (Acciones/Indicador/Meta) y sus columnas.
-      - Captura filas de contenido hasta que cambie de bloque o se vacíe.
-    Devuelve columnas: problematica, linea_accion, accion_estrategica, indicador, meta
+    Busca la fila de encabezados de la tabla y devuelve:
+    - idx_fila
+    - dict con índices de columnas {'accion': cA, 'indicador': cI, 'meta': cM, 'lider': cL, 'cogestores': cC?}
     """
     nrows, ncols = df.shape
-    # Normalizar a strings
+    for i in range(nrows):
+        row = [str(df.iat[i, j]) if pd.notna(df.iat[i, j]) else "" for j in range(ncols)]
+        low = [_norm(x) for x in row]
+        # claves mínimas: accion / indicador / meta (en cualquier posición de la fila)
+        if any("acciones estrategicas" in x or "accion" in x for x in low) and \
+           any("indicador" in x for x in low) and \
+           any(re.search(r"\bmeta(s)?\b", x) for x in low):
+            # mapear posiciones
+            mapping = {"accion": None, "indicador": None, "meta": None, "lider": None, "cogestores": None}
+            for j, cell in enumerate(low):
+                if mapping["accion"] is None and ("acciones estrategicas" in cell or "accion" in cell):
+                    mapping["accion"] = j
+                if mapping["indicador"] is None and "indicador" in cell:
+                    mapping["indicador"] = j
+                if mapping["meta"] is None and re.search(r"\bmeta(s)?\b", cell):
+                    mapping["meta"] = j
+                if mapping["lider"] is None and ("lider estrategico" in cell or "líder estratégico" in cell):
+                    mapping["lider"] = j
+                if mapping["cogestores"] is None and ("co-gestores" in cell or "cogestores" in cell):
+                    mapping["cogestores"] = j
+            # validar mínimos
+            if all(mapping[k] is not None for k in ["accion","indicador","meta"]):
+                return i, mapping
+    return -1, {}
+
+def extraer_contexto_superior(df: pd.DataFrame, hasta_fila: int) -> Dict[str, str]:
+    """
+    Busca hacia arriba (desde 0 .. hasta_fila-1) los textos:
+    - 'Cadena de Resultados: ...' -> problematica
+    - 'Línea de acción #...'      -> linea_accion (la última encontrada antes de la tabla)
+    Si hay varias líneas de acción por bloque, se actualizará durante el barrido de las filas de datos.
+    """
+    problem = ""
+    linea = ""
+    for i in range(hasta_fila):
+        for j in range(df.shape[1]):
+            val = df.iat[i, j]
+            if pd.isna(val):
+                continue
+            txt = str(val).strip()
+            low = _norm(txt)
+            if low.startswith("cadena de resultados"):
+                problem = txt.split(":", 1)[-1].strip() if ":" in txt else txt
+            if low.startswith("linea de accion") or low.startswith("línea de acción"):
+                linea = txt
+    return {"problematica": problem, "linea_accion": linea}
+
+def lider_es_muni(texto: str) -> bool:
+    t = _norm(texto)
+    return any(p in t for p in ["municip", "gobierno local", "alcald", "ayuntamiento"])
+
+def parsear_matriz(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    1) Localiza encabezados de tabla.
+    2) Reconstruye problemática/ línea de acción del bloque superior.
+    3) Recorre filas de datos; si en la misma fila hay nueva 'Línea de acción', la actualiza.
+    """
+    nrows, ncols = df.shape
+    # Trabajar como strings
     S = df.astype(str).where(~df.isna(), "")
 
+    fila_hdr, cols = buscar_fila_encabezados(S)
+    if fila_hdr < 0:
+        return pd.DataFrame(columns=["problematica","linea_accion","accion_estrategica","indicador","meta","lider"])
+
+    ctx = extraer_contexto_superior(S, fila_hdr)
+    cur_problem = ctx["problematica"]
+    cur_linea = ctx["linea_accion"]
+
     registros: List[Dict] = []
-    cur_problem = ""
-    cur_linea   = ""
-    acc_c = ind_c = meta_c = None
-
-    i = 0
-    while i < nrows:
-        row_vals = [_s(S.iat[i, j]) for j in range(ncols)]
-        row_concat = " | ".join(row_vals).lower()
-
-        # Detecta Problemática
-        found_prob = None
+    for i in range(fila_hdr + 1, nrows):
+        row_vals = [S.iat[i, j] for j in range(ncols)]
+        # si la fila contiene una nueva "Línea de acción", actualizar contexto
         for j in range(ncols):
-            v = row_vals[j]
-            if v.lower().startswith("cadena de resultados"):
-                # texto después de ':'
-                found_prob = v.split(":", 1)[-1].strip() if ":" in v else v
-                break
-        if found_prob is not None:
-            cur_problem = found_prob
-            i += 1
-            continue
-
-        # Detecta Línea de acción
-        found_linea = None
+            low = _norm(row_vals[j])
+            if low.startswith("linea de accion") or low.startswith("línea de acción"):
+                cur_linea = row_vals[j].strip()
+        # si la fila contiene una nueva "Cadena de Resultados", actualizar problemática
         for j in range(ncols):
-            v = row_vals[j].lower()
-            if v.startswith("línea de acción") or v.startswith("linea de accion"):
-                found_linea = row_vals[j]
-                break
-        if found_linea is not None:
-            cur_linea = found_linea
-            # al cambiar de línea, “olvidar” mapeo de columnas para encontrarlas de nuevo si reaparecen más abajo
-            acc_c = ind_c = meta_c = None
-            i += 1
+            low = _norm(row_vals[j])
+            if low.startswith("cadena de resultados"):
+                txt = row_vals[j].strip()
+                cur_problem = txt.split(":",1)[-1].strip() if ":" in txt else txt
+
+        # tomar valores por columnas mapeadas
+        def _get(col_idx: Optional[int]) -> str:
+            return row_vals[col_idx].strip() if (col_idx is not None and col_idx < ncols) else ""
+
+        accion = _get(cols.get("accion"))
+        indicador = _get(cols.get("indicador"))
+        meta = _get(cols.get("meta"))
+        lider = _get(cols.get("lider"))
+
+        # cortar si fila vacía en las tres columnas clave
+        if not any([accion, indicador, meta]):
             continue
 
-        # Detecta encabezados Accion/Indicador/Meta en esta fila
-        if acc_c is None or ind_c is None or meta_c is None:
-            a, b, c = find_header_cols(row_vals)
-            if a is not None and b is not None and c is not None:
-                acc_c, ind_c, meta_c = a, b, c
-                i += 1
-                continue
+        registros.append({
+            "problematica": cur_problem,
+            "linea_accion": cur_linea,
+            "accion_estrategica": accion,
+            "indicador": indicador,
+            "meta": meta,
+            "lider": lider
+        })
 
-        # Si ya conocemos las columnas de contenido, leer filas de datos
-        if acc_c is not None and ind_c is not None and meta_c is not None:
-            acc_val  = row_vals[acc_c] if acc_c < ncols else ""
-            ind_val  = row_vals[ind_c] if ind_c < ncols else ""
-            meta_val = row_vals[meta_c] if meta_c < ncols else ""
-            hay_algo = any([acc_val, ind_val, meta_val])
-
-            # si la fila está vacía y no es encabezado ni títulos, terminar bloque de tabla
-            if not hay_algo:
-                i += 1
-                continue
-
-            # Guardar registro si tenemos una línea y/o problemática activa
-            if cur_problem or cur_linea:
-                registros.append({
-                    "problematica": cur_problem,
-                    "linea_accion": cur_linea,
-                    "accion_estrategica": acc_val,
-                    "indicador": ind_val,
-                    "meta": meta_val,
-                })
-            i += 1
-            continue
-
-        i += 1
-
-    # limpiar basura (filas totalmente vacías)
     df_out = pd.DataFrame(registros)
     if not df_out.empty:
+        # Limpieza básica
         df_out = df_out.replace({"None": "", "nan": ""})
-        df_out = df_out[~(df_out[["accion_estrategica","indicador","meta"]].fillna("").eq("").all(axis=1))]
-    return df_out
+        # Mantener solo filas municipales
+        df_out = df_out[df_out["lider"].apply(lider_es_muni)]
+    return df_out.reset_index(drop=True)
 
-def filtrar_municipal(df: pd.DataFrame, palabra_clave: str) -> pd.DataFrame:
-    if not palabra_clave.strip():
-        return df
-    kw = palabra_clave.lower()
-    mask = df.apply(lambda r: kw in (" ".join([str(x) for x in r.values])).lower(), axis=1)
-    return df[mask]
-
-# ------------------ PDF ------------------
-
-def add_cover_from_path(c: canvas.Canvas, image_path: Optional[str]):
+# ---------------- PDF ----------------
+def portada_con_imagen(c: canvas.Canvas, image_path: Optional[str]):
     y_top = A4[1] - 2.5*cm
     if image_path:
         try:
@@ -177,9 +188,7 @@ def add_cover_from_path(c: canvas.Canvas, image_path: Optional[str]):
             c.drawImage(img, x, y, width=w, height=h, preserveAspectRatio=True, mask='auto')
             y_top = y - 0.8*cm
         except Exception:
-            # sin imagen no rompemos
             pass
-
     c.setFillColor(AZUL_OSCURO)
     c.setFont("Helvetica-Bold", 28)
     c.drawCentredString(A4[0]/2, y_top-1.6*cm, "INFORME DE SEGUIMIENTO")
@@ -244,23 +253,21 @@ def ensure_space(c: canvas.Canvas, y: float, need: float, page: int, total: int)
         return A4[1] - 3.6*cm, page+1
     return y, page
 
-def crear_pdf(regs: pd.DataFrame, image_path: Optional[str]) -> bytes:
+def crear_pdf(df_rows: pd.DataFrame, image_path: Optional[str]) -> bytes:
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
-
     # Portada
-    add_cover_from_path(c, image_path)
-
-    # Páginas de contenido
-    total_pages_est = 1 + max(1, len(regs))  # estimación simple
+    portada_con_imagen(c, image_path)
+    # Contenido
+    total_pages_est = 1 + max(1, len(df_rows))
     page = 1
     draw_header(c, page, total_pages_est)
     y = A4[1] - 3.6*cm
     x = 1.4*cm
     w = A4[0] - 2.8*cm
-
     idx = 1
-    for _, r in regs.iterrows():
+
+    for _, r in df_rows.iterrows():
         prob = r.get("problematica", "")
         lin  = r.get("linea_accion", "")
         acc  = r.get("accion_estrategica", "")
@@ -282,7 +289,7 @@ def crear_pdf(regs: pd.DataFrame, image_path: Optional[str]) -> bytes:
         y, page = ensure_space(c, y, 2.6*cm, page, total_pages_est)
         y = section(c, x, y, w, "Meta", meta)
 
-        # Resultado (único editable)
+        # Resultado (único campo editable)
         alto = 4.5*cm
         y, page = ensure_space(c, y, alto + 1.6*cm, page, total_pages_est)
         c.setFillColor(AZUL_CLARO)
@@ -307,37 +314,35 @@ def crear_pdf(regs: pd.DataFrame, image_path: Optional[str]) -> bytes:
     buf.seek(0)
     return buf.read()
 
-# ------------------ UI ------------------
-
+# ---------------- UI ----------------
 with st.sidebar:
+    # Ruta de la imagen que ya tienes en tu repo
     ruta_img = st.text_input("Ruta imagen portada (en tu repo)", value="assets/encabezado.png")
-    palabra_muni = st.text_input("Filtro municipal (vacío = sin filtrar)", value="municip")
 
 excel_file = st.file_uploader("Subí tu Excel de la matriz", type=["xlsx", "xls"])
 
 if excel_file is None:
-    st.info("Cargá el Excel para comenzar. La imagen se toma de la ruta local que indiques en la barra lateral.")
+    st.info("Cargá el Excel para continuar. La imagen de portada se lee desde la ruta local indicada en la barra lateral.")
     st.stop()
 
-# Leer (primera hoja)
+# Leer sin encabezados (tal cual tu archivo)
 try:
-    df_raw = pd.read_excel(excel_file, engine="openpyxl", header=None)  # sin suponer encabezados
+    df_raw = pd.read_excel(excel_file, engine="openpyxl", header=None)
 except Exception as e:
     st.error(f"No se pudo leer el Excel: {e}")
     st.stop()
 
-regs = parse_matriz_dynamic(df_raw)
+# Parsear y filtrar municipalidad
+regs = parsear_matriz(df_raw)
 
 if regs.empty:
-    st.warning("No se detectaron bloques. Verifica que existan celdas con 'Cadena de Resultados' y 'Línea de acción #', y que la fila de encabezados contenga 'Accion/Indicador/Meta'.")
+    st.warning("No se encontraron filas municipales o no se detectó la tabla. Revisá que existan los encabezados: Acciones / Indicador / Meta / Líder Estratégico.")
 else:
-    # Filtro municipal
-    regs_filtrado = filtrar_municipal(regs, palabra_muni) if palabra_muni else regs
     st.subheader("Vista previa (líneas incluidas)")
-    st.dataframe(regs_filtrado, use_container_width=True)
+    st.dataframe(regs[["problematica","linea_accion","accion_estrategica","indicador","meta","lider"]], use_container_width=True)
 
     if st.button("Generar PDF editable"):
-        pdf_bytes = crear_pdf(regs_filtrado, ruta_img if ruta_img else None)
+        pdf_bytes = crear_pdf(regs, ruta_img if ruta_img else None)
         st.success("PDF generado.")
         st.download_button(
             label="⬇️ Descargar PDF",
@@ -345,8 +350,6 @@ else:
             file_name="Informe_Seguimiento_GobiernoLocal.pdf",
             mime="application/pdf"
         )
-
-
 
 
 
