@@ -1,4 +1,4 @@
-# app.py — División por indicador + forward-fill (Acción/Meta/Líder) + numeración N, N.1, N.2… + sólo Municipalidad
+# app.py — Numeración simple 1,2,3... | campos únicos | "Gobierno Local de <CANTÓN>" desde el nombre del Excel
 import io, re, unicodedata
 from typing import Dict, List, Optional
 from pathlib import Path
@@ -27,7 +27,7 @@ st.markdown("""
 - Detecta por **contenido**: *Cadena de Resultados*, *Línea de acción #*, encabezados (Acciones, Indicador/Productos-Servicios, Meta/Efectos, Líder, Co-gestores).
 - **Divide** una acción en **múltiples fichas** (una por **Indicador**) y **arrastra** Acción/Meta/Líder dentro del bloque si vienen en celdas combinadas.
 - **Sólo** incluye fichas con **Líder municipal**.
-- Numeración: **Acción #N** (una ficha) o **Acción #N.1 / #N.2 / …** (si hay varias por la misma acción).
+- Numeración **simple**: **Acción #1, #2, #3, …** (sin 2.1).
 - En el PDF: cada **Problemática** arranca **página nueva**; luego sus **Líneas** y **fichas**.
 - La portada se detecta automáticamente (archivos `imagen23.*`, `encabezado.*`, `portada.*`, `header.*`).
 """)
@@ -220,8 +220,30 @@ def autodetect_cover_image() -> Optional[str]:
     cands = [p for p in cands if p.suffix.lower() in exts]
     return str(cands[0]) if cands else None
 
+# ========= Extra: "Gobierno Local de <CANTÓN>" desde el nombre del archivo =========
+def guess_canton_from_filename(filename: str) -> str:
+    """
+    Heurística:
+    - toma el nombre sin extensión,
+    - si hay ' - ' usa el último segmento,
+    - elimina [entre corchetes], 'versión', 'final', 'modificado', etc.,
+    - devuelve la PRIMERA palabra capitalizada de ese segmento.
+    """
+    base = Path(filename).stem.replace("_", " ").strip()
+    seg = base.split(" - ")[-1].strip() if " - " in base else base
+    seg = re.sub(r"\[.*?\]", "", seg, flags=re.U)  # quitar [Vista protegida], etc.
+    seg = re.sub(r"(?i)\b(modificado|version|versi[oó]n|final|oficial|vista|protegida)\b", "", seg).strip()
+    # tomar la primera palabra con inicial mayúscula (o todo si una sola)
+    tokens = [t for t in seg.split() if t]
+    if not tokens: return ""
+    # elegimos la primera que empiece con letra (no D29, etc.)
+    for t in tokens:
+        if re.match(r"[A-Za-zÁÉÍÓÚÑ]", t):
+            return t.capitalize()
+    return tokens[0].capitalize()
+
 # ========= PDF helpers =========
-def portada(c: canvas.Canvas, image_path: Optional[str]):
+def portada(c: canvas.Canvas, image_path: Optional[str], canton: str):
     y_top = A4[1] - 2.5*cm
     if image_path:
         try:
@@ -236,7 +258,9 @@ def portada(c: canvas.Canvas, image_path: Optional[str]):
             pass
     c.setFillColor(AZUL_OSCURO)
     c.setFont("Helvetica-Bold", 28); c.drawCentredString(A4[0]/2, y_top-1.6*cm, "INFORME DE SEGUIMIENTO")
-    c.setFont("Helvetica-Bold", 22); c.drawCentredString(A4[0]/2, y_top-3.1*cm, "Gobierno Local")
+    c.setFont("Helvetica-Bold", 22)
+    titulo = f"Gobierno Local de {canton}" if canton else "Gobierno Local"
+    c.drawCentredString(A4[0]/2, y_top-3.1*cm, titulo)
     c.setFont("Helvetica", 11); c.setFillColor(NEGRO); c.drawCentredString(A4[0]/2, y_top-4.6*cm, "Sembremos Seguridad")
     c.showPage()
 
@@ -279,7 +303,7 @@ def ensure_space(c, y, need, page, total):
         return A4[1]-3.6*cm, page+1
     return y, page
 
-def ficha_accion(c, x, y, w, label, fila) -> float:
+def ficha_accion(c, x, y, w, label, fila, field_name: str) -> float:
     """Tarjeta por Acción con Resultado editable."""
     c.setStrokeColor(BORDE); c.setFillColor(colors.white)
     c.rect(x, y-5.8*cm, w, 5.8*cm, fill=0, stroke=1)
@@ -304,8 +328,10 @@ def ficha_accion(c, x, y, w, label, fila) -> float:
     c.drawString(x+0.35*cm, y_text-0.45*cm, "Resultado (rellenable por Gobierno Local)")
     c.setStrokeColor(BORDE)
     c.rect(x+0.2*cm, y_text-(alto+1.0*cm), w-0.4*cm, alto, fill=0, stroke=1)
+
+    # ⚠️ Nombre ÚNICO para evitar que se replique el texto entre campos
     c.acroForm.textfield(
-        name=f"resultado_{label}",
+        name=field_name,
         tooltip=f"Resultado acción {label}",
         x=x+0.25*cm, y=y_text-(alto+1.0*cm)+0.1*cm,
         width=w-0.5*cm, height=alto-0.2*cm,
@@ -314,9 +340,9 @@ def ficha_accion(c, x, y, w, label, fila) -> float:
     )
     return y_text-(alto+1.4*cm)
 
-def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str]) -> bytes:
+def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], canton: str) -> bytes:
     buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=A4)
-    portada(c, image_path)
+    portada(c, image_path, canton)
 
     if rows.empty:
         groups = [("", rows)]
@@ -326,6 +352,7 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str]) 
 
     total = 1 + max(1, len(groups))
     page = 0
+    unique_field_counter = 0  # <- contador global de campos para nombres únicos
 
     for prob, df_prob in groups:
         page += 1
@@ -349,15 +376,14 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str]) 
             y = wrap_text(c, lin or "", x+0.2*cm, y, w-0.4*cm)
             y -= 0.3*cm
 
-            # --- Numeración por Acción: N, N.1, N.2… ---
-            acciones_order = list(dict.fromkeys(gdf["accion_estrategica"].fillna("").tolist()))
-            for n_acc, acc_name in enumerate(acciones_order, start=1):
-                sub = gdf[gdf["accion_estrategica"] == acc_name].reset_index(drop=True)
-                multi = len(sub) > 1
-                for j, fila in sub.iterrows():
-                    label = f"{n_acc}.{j+1}" if multi else f"{n_acc}"
-                    y, page = ensure_space(c, y, 7.0*cm, page, total)
-                    y = ficha_accion(c, x, y, w, label, fila)
+            # Numeración SIMPLE 1,2,3... por línea:
+            num_simple = 1
+            for _, fila in gdf.iterrows():
+                y, page = ensure_space(c, y, 7.0*cm, page, total)
+                unique_field_counter += 1
+                field_name = f"resultado_{unique_field_counter}"  # siempre único
+                y = ficha_accion(c, x, y, w, str(num_simple), fila, field_name)
+                num_simple += 1
 
         footer(c)
 
@@ -375,6 +401,9 @@ excel_file = st.file_uploader("Subí tu Excel (multi-hoja o una sola)", type=["x
 if not excel_file:
     st.info("Cargá el Excel para comenzar.")
     st.stop()
+
+# Nombre del cantón desde el nombre del archivo
+canton_name = guess_canton_from_filename(excel_file.name)
 
 xls = pd.ExcelFile(excel_file, engine="openpyxl")
 modo = st.radio("Hojas a procesar", ["Todas", "Elegir una"], horizontal=True)
@@ -396,9 +425,8 @@ cols = ["hoja","problematica","linea_accion","accion_estrategica","indicador","m
 st.dataframe(regs_muni[cols], use_container_width=True)
 
 if st.button("Generar PDF editable"):
-    pdf = build_pdf_grouped_by_problem(regs_muni, cover_path)
+    pdf = build_pdf_grouped_by_problem(regs_muni, cover_path, canton_name)
     st.success("PDF generado.")
-    st.download_button("⬇️ Descargar PDF", data=pdf, file_name="Informe_Seguimiento_GobiernoLocal.pdf", mime="application/pdf")
-
+    st.download_button("⬇️ Descargar PDF", data=pdf, file_name=f"Informe_Seguimiento_GobiernoLocal_{canton_name or 'PDF'}.pdf", mime="application/pdf")
 
 
