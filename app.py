@@ -1,4 +1,4 @@
-# app.py — parser por CONTENIDO + multi-hoja + PDF editable (solo “Resultado”)
+# app.py — Parser por contenido + multi-hoja + PDF agrupado con único campo editable ("Resultado")
 import io, re, unicodedata
 from typing import Dict, List, Optional, Tuple
 
@@ -12,36 +12,36 @@ from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.lib.utils import ImageReader
 
-# ===== Estilo institucional =====
+# ========= Estilo institucional =========
 AZUL_OSCURO = colors.HexColor("#1F4E79")
 AZUL_CLARO  = colors.HexColor("#DCEBF7")
 BORDE       = colors.HexColor("#9BBBD9")
 NEGRO       = colors.black
 FF_MULTILINE = 4096  # Campo multilínea para AcroForm
 
-st.set_page_config(page_title="PDF editable – Seguimiento GL", layout="wide")
+# ========= Config Streamlit =========
+st.set_page_config(page_title="PDF editable – Gobierno Local", layout="wide")
 st.title("Generar PDF editable – Gobierno Local (Sembremos Seguridad)")
 
 st.markdown(
     """
-Subí tu **Excel**. El sistema busca por **contenido** (no por celdas fijas):
-
-- *Cadena de Resultados: …*  
-- *Línea de acción #…*  
-- Encabezados: **Acciones** / **Indicador** (o *Productos/Servicios*) / (*Consideraciones* si existe) / **Meta** (o *Efectos*) / **Líder Estratégico** / **Co-gestores**  
-- Filtrado por **Municipalidad** (opcional)  
-- PDF: todo fijo salvo **“Resultado”** (editable)
+Subí tu **Excel** (una o varias hojas). La app detecta por **contenido**:
+- **Cadena de Resultados**, **Línea de acción #**  
+- Encabezados: **Acciones**, **Indicador** (*o* **Productos/Servicios**), **Meta** (*o* **Efectos**), **Líder Estratégico**, **Co-gestores**  
+- Filtrado por **Municipalidad** (estricto o amplio)  
+- El **PDF** muestra *Problemática* y *Línea* **una sola vez** y luego **fichas** por acción con **Resultado** como único campo editable.
 """
 )
 
-# ================= Utils =================
+# ========= Utilidades =========
 def _norm(s: str) -> str:
-    if s is None: return ""
+    """Normaliza texto: minúsculas sin acentos/espacios extremos."""
+    if s is None:
+        return ""
     s = str(s).strip().lower()
-    # quitar acentos para comparar
     return "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
 
-# sinónimos que aparecen en tus plantillas
+# Sinónimos que se ven en tus matrices
 SIN_ACCION = ["acciones estrategicas", "acciones estrategica", "accion estrategica", "accion", "acciones"]
 SIN_INDIC  = ["indicador", "indicadores", "productos/servicios", "producto/servicio", "producto", "servicio"]
 SIN_META   = ["meta", "metas", "efecto", "efectos", "resultados esperados"]
@@ -53,14 +53,13 @@ RE_CADENA = re.compile(r"^cadena\s+de\s+resultados", re.I)
 RE_LINEA  = re.compile(r"^l[ií]nea\s+de\s+acci[oó]n\s*#?\s*\d*", re.I)
 
 def _find_any(cell: str, keys: List[str]) -> bool:
-    low = _norm(cell)
-    return any(k in low for k in keys)
+    return any(k in _norm(cell) for k in keys)
 
 def find_header_in_row(row_vals: List[str]) -> Dict[str, int]:
     """
     Dada una fila, intenta ubicar columnas por texto.
-    Devuelve dict con indices: accion, indicador, meta, lider, cogestores, consideraciones?
-    Algunas pueden no existir (None).
+    Devuelve dict con indices: accion, indicador, meta, lider, cogestores, consideraciones (algunas pueden no existir).
+    Para considerar "encabezado" deben existir al menos acción/indicador/meta.
     """
     n = len(row_vals)
     idx = {"accion": None, "indicador": None, "meta": None, "lider": None, "cogestores": None, "consideraciones": None}
@@ -72,53 +71,47 @@ def find_header_in_row(row_vals: List[str]) -> Dict[str, int]:
         if idx["lider"] is None and _find_any(v, SIN_LIDER): idx["lider"] = j
         if idx["cogestores"] is None and _find_any(v, SIN_COGE): idx["cogestores"] = j
         if idx["consideraciones"] is None and _find_any(v, SIN_CONSID): idx["consideraciones"] = j
-    # al menos acción/indicador/meta deben existir para considerar "encabezado"
-    if all(idx[k] is not None for k in ["accion","indicador","meta"]):
-        return idx
-    return {}
+    return idx if all(idx[k] is not None for k in ["accion","indicador","meta"]) else {}
 
 def es_muni(texto: str) -> bool:
     t = _norm(texto)
     return any(p in t for p in ["municip", "gobierno local", "alcald", "ayuntamiento"])
 
-# ================ PARSER por hoja ================
+# ========= Parser por hoja =========
 def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
     """
-    Recorre TODAS las celdas:
-      - guarda última 'Cadena de Resultados' y 'Línea de acción #'
-      - detecta fila de encabezados (con sinónimos)
-      - extrae filas de datos hasta que se vacíen las columnas clave
+    Recorre toda la hoja:
+      - Guarda última 'Cadena de Resultados' y 'Línea de acción #'
+      - Detecta fila de encabezados (acepta sinónimos)
+      - Extrae filas de datos hasta que se vacían las columnas clave
     Devuelve: problematica, linea_accion, accion_estrategica, indicador, meta, lider, cogestores, hoja
     """
     S = df_raw.astype(str).where(~df_raw.isna(), "")
     nrows, ncols = S.shape
     current_problem = ""
     current_linea   = ""
-    header_idx: Optional[Dict[str,int]] = None
     rows: List[Dict] = []
 
     i = 0
     while i < nrows:
         row_vals = [S.iat[i, j].strip() for j in range(ncols)]
 
-        # actualizar contexto (título y línea) en cualquier columna
+        # Actualizar contexto si en esta fila aparece una nueva Cadena/Línea
         for j in range(ncols):
             cell = row_vals[j]
             if RE_CADENA.match(cell):
-                # tomar texto luego de ':' si existe
                 current_problem = cell.split(":",1)[-1].strip() if ":" in cell else cell.strip()
             if RE_LINEA.match(cell):
                 current_linea = cell.strip()
 
-        # detectar encabezado
+        # Detectar encabezado
         hdr = find_header_in_row(row_vals)
         if hdr:
-            header_idx = hdr
-            # leer filas de datos hacia abajo
+            # Leer filas de datos hacia abajo
             i += 1
             while i < nrows:
                 row_vals = [S.iat[i, j].strip() for j in range(ncols)]
-                # si aparece nueva cadena o nueva línea, actualizo contexto y NO rompo (hay matrices con varias tablas)
+                # Contexto puede volver a actualizarse más abajo
                 for j in range(ncols):
                     cell = row_vals[j]
                     if RE_CADENA.match(cell):
@@ -129,11 +122,11 @@ def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
                 def get(col):
                     return row_vals[col].strip() if (col is not None and col < ncols) else ""
 
-                acc  = get(header_idx.get("accion"))
-                ind  = get(header_idx.get("indicador"))
-                meta = get(header_idx.get("meta"))
-                lid  = get(header_idx.get("lider"))
-                cog  = get(header_idx.get("cogestores"))
+                acc  = get(hdr.get("accion"))
+                ind  = get(hdr.get("indicador"))
+                meta = get(hdr.get("meta"))
+                lid  = get(hdr.get("lider"))
+                cog  = get(hdr.get("cogestores"))
 
                 # fin del bloque si no hay datos en las 3 clave
                 if not any([acc, ind, meta]):
@@ -150,18 +143,14 @@ def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
                     "hoja": sheet_name,
                 })
                 i += 1
-            # después de consumir el bloque, continuo sin perder el while principal
             continue
 
         i += 1
 
     return pd.DataFrame(rows)
 
-# ================ PARSER de libro completo ================
+# ========= Parser de libro completo =========
 def parse_workbook(xls_bytes) -> pd.DataFrame:
-    """
-    Lee todas las hojas y concatena resultados.
-    """
     xls = pd.ExcelFile(xls_bytes, engine="openpyxl")
     todo = []
     for sheet in xls.sheet_names:
@@ -169,11 +158,11 @@ def parse_workbook(xls_bytes) -> pd.DataFrame:
         parsed = parse_sheet(df, sheet)
         if not parsed.empty:
             todo.append(parsed)
-    return pd.concat(todo, ignore_index=True) if todo else pd.DataFrame(
-        columns=["problematica","linea_accion","accion_estrategica","indicador","meta","lider","cogestores","hoja"]
-    )
+    if todo:
+        return pd.concat(todo, ignore_index=True)
+    return pd.DataFrame(columns=["problematica","linea_accion","accion_estrategica","indicador","meta","lider","cogestores","hoja"])
 
-# ================= PDF helpers =================
+# ========= Helpers PDF (agrupado) =========
 def portada(c: canvas.Canvas, image_path: Optional[str]):
     y_top = A4[1] - 2.5*cm
     if image_path:
@@ -216,10 +205,16 @@ def wrap_text(c, text, x, y, w, font="Helvetica", size=10):
     if line: c.drawString(x,ty,line); ty-=lh
     return ty
 
-def section(c, x, y, w, title, body):
+def section_bar(c, x, y, w, title):
     c.setFillColor(AZUL_CLARO); c.rect(x, y-0.9*cm, w, 0.9*cm, fill=1, stroke=0)
-    c.setFillColor(AZUL_OSCURO); c.setFont("Helvetica-Bold", 11); c.drawString(x+0.2*cm, y-0.6*cm, title)
-    c.setFillColor(NEGRO); return wrap_text(c, body, x+0.2*cm, y-1.4*cm, w-0.4*cm)
+    c.setFillColor(AZUL_OSCURO); c.setFont("Helvetica-Bold", 11)
+    c.drawString(x+0.2*cm, y-0.6*cm, title)
+    return y-1.1*cm
+
+def kv_item(c, x, y, w, label, value):
+    c.setFillColor(NEGRO); c.setFont("Helvetica-Bold", 10)
+    c.drawString(x, y, f"{label}:")
+    return wrap_text(c, value, x+3.3*cm, y, w-3.5*cm, font="Helvetica", size=10)
 
 def ensure_space(c, y, need, page, total):
     if y-need < 2.8*cm:
@@ -227,61 +222,116 @@ def ensure_space(c, y, need, page, total):
         return A4[1]-3.6*cm, page+1
     return y, page
 
-def build_pdf(rows: pd.DataFrame, image_path: Optional[str]) -> bytes:
+def ficha_accion(c, x, y, w, idx, fila) -> float:
+    """
+    Tarjeta por Acción Estratégica con:
+    - Acción Estratégica
+    - Indicador
+    - Meta
+    - Líder Estratégico
+    - Resultado (editable)
+    """
+    # Marco de ficha
+    c.setStrokeColor(BORDE); c.setFillColor(colors.white)
+    c.rect(x, y-5.8*cm, w, 5.8*cm, fill=0, stroke=1)
+
+    # Encabezado de la ficha
+    c.setFillColor(AZUL_CLARO); c.rect(x, y-0.9*cm, w, 0.9*cm, fill=1, stroke=0)
+    c.setFillColor(AZUL_OSCURO); c.setFont("Helvetica-Bold", 11)
+    c.drawString(x+0.2*cm, y-0.6*cm, f"Acción #{idx}")
+
+    y_text = y-1.3*cm
+    y_text = kv_item(c, x+0.2*cm, y_text, w-0.4*cm, "Acción Estratégica", fila.get("accion_estrategica",""))
+    y_text -= 0.2*cm
+    y_text = kv_item(c, x+0.2*cm, y_text, w-0.4*cm, "Indicador", fila.get("indicador",""))
+    y_text -= 0.2*cm
+    y_text = kv_item(c, x+0.2*cm, y_text, w-0.4*cm, "Meta", fila.get("meta",""))
+    y_text -= 0.2*cm
+    y_text = kv_item(c, x+0.2*cm, y_text, w-0.4*cm, "Líder Estratégico", fila.get("lider",""))
+
+    # Resultado (único editable)
+    alto = 2.2*cm
+    c.setFillColor(AZUL_CLARO)
+    c.rect(x+0.2*cm, y_text-0.7*cm, w-0.4*cm, 0.7*cm, fill=1, stroke=0)
+    c.setFillColor(AZUL_OSCURO); c.setFont("Helvetica-Bold", 10)
+    c.drawString(x+0.35*cm, y_text-0.45*cm, "Resultado (rellenable por Gobierno Local)")
+    c.setStrokeColor(BORDE)
+    c.rect(x+0.2*cm, y_text-(alto+1.0*cm), w-0.4*cm, alto, fill=0, stroke=1)
+    c.acroForm.textfield(
+        name=f"resultado_{idx}",
+        tooltip=f"Resultado acción {idx}",
+        x=x+0.25*cm, y=y_text-(alto+1.0*cm)+0.1*cm,
+        width=w-0.5*cm, height=alto-0.2*cm,
+        borderStyle="inset", borderWidth=1, forceBorder=True,
+        fontName="Helvetica", fontSize=10, fieldFlags=FF_MULTILINE
+    )
+    return y_text-(alto+1.4*cm)
+
+def build_pdf_grouped(rows: pd.DataFrame, image_path: Optional[str]) -> bytes:
+    """
+    Para cada (Problemática, Línea): imprime Problemática y Línea UNA sola vez
+    y luego N fichas (una por acción) con Resultado editable.
+    """
     buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=A4)
     portada(c, image_path)
-    total = 1 + max(1, len(rows))
+
+    # Agrupar por (problematica, linea_accion)
+    grupos = []
+    if rows.empty:
+        grupos = [(("", ""), rows)]
+    else:
+        for (prob, lin), g in rows.groupby(["problematica","linea_accion"], dropna=False):
+            grupos.append(((prob or ""), (lin or ""), g.reset_index(drop=True)))
+
+    total = 1 + max(1, len(grupos))
     page = 1; header(c, page, total)
-    y = A4[1]-3.6*cm; x = 1.4*cm; w = A4[0]-2.8*cm; idx = 1
+    x = 1.4*cm; w = A4[0]-2.8*cm; y = A4[1]-3.6*cm
 
-    for _, r in rows.iterrows():
-        y, page = ensure_space(c, y, 3.0*cm, page, total); y = section(c, x, y, w, "Cadena de Resultados / Problemática", r.get("problematica",""))
-        y, page = ensure_space(c, y, 2.6*cm, page, total); y = section(c, x, y, w, "Línea de acción", r.get("linea_accion",""))
-        y, page = ensure_space(c, y, 2.6*cm, page, total); y = section(c, x, y, w, "Acción Estratégica", r.get("accion_estrategica",""))
-        y, page = ensure_space(c, y, 2.6*cm, page, total); y = section(c, x, y, w, "Indicador", r.get("indicador",""))
-        y, page = ensure_space(c, y, 2.6*cm, page, total); y = section(c, x, y, w, "Meta", r.get("meta",""))
+    for (prob, lin, gdf) in grupos:
+        # Cabeceras del bloque (una sola vez)
+        y, page = ensure_space(c, y, 4.0*cm, page, total)
+        y = section_bar(c, x, y, w, "Cadena de Resultados / Problemática")
+        y = wrap_text(c, prob, x+0.2*cm, y, w-0.4*cm)
+        y -= 0.2*cm
+        y = section_bar(c, x, y, w, "Línea de acción")
+        y = wrap_text(c, lin, x+0.2*cm, y, w-0.4*cm)
+        y -= 0.3*cm
 
-        # único campo editable
-        alto = 4.5*cm
-        y, page = ensure_space(c, y, alto+1.6*cm, page, total)
-        c.setFillColor(AZUL_CLARO); c.rect(x, y-0.9*cm, w, 0.9*cm, fill=1, stroke=0)
-        c.setFillColor(AZUL_OSCURO); c.setFont("Helvetica-Bold", 11)
-        c.drawString(x+0.2*cm, y-0.6*cm, "Resultado (rellenable por Gobierno Local)")
-        c.setStrokeColor(BORDE); c.rect(x, y-(alto+1.2*cm), w, alto, fill=0, stroke=1)
-        c.acroForm.textfield(
-            name=f"resultado_{idx}", tooltip=f"Resultado línea {idx}",
-            x=x+0.15*cm, y=y-(alto+1.2*cm)+0.15*cm, width=w-0.3*cm, height=alto-0.3*cm,
-            borderStyle="inset", borderWidth=1, forceBorder=True,
-            fontName="Helvetica", fontSize=10, fieldFlags=FF_MULTILINE
-        )
-        y -= (alto+1.6*cm); idx += 1
+        # Fichas de acciones
+        for idx, fila in gdf.iterrows():
+            y, page = ensure_space(c, y, 7.0*cm, page, total)
+            y = ficha_accion(c, x, y, w, idx+1, fila)
+
+        # Separación entre bloques
+        y -= 0.6*cm
+        if y < 4*cm:
+            footer(c); c.showPage(); page += 1; header(c, page, total); y = A4[1]-3.6*cm
 
     footer(c); c.save(); buf.seek(0); return buf.read()
 
-# ================= UI =================
+# ========= UI =========
 with st.sidebar:
-    ruta_img = st.text_input("Ruta imagen portada (del repo)", value="assets/encabezado.png")
+    ruta_img = st.text_input("Ruta imagen portada (en tu repo)", value="assets/encabezado.png")
     filtro = st.selectbox("Filtrar municipalidad", ["Líder contiene", "Líder o Co-gestores", "Sin filtro"])
     modo_hojas = st.radio("Hojas a procesar", ["Todas", "Elegir una"])
 
-excel_file = st.file_uploader("Subí tu Excel (toma todas las hojas por defecto)", type=["xlsx","xls"])
+excel_file = st.file_uploader("Subí tu Excel (multipestaña o una sola)", type=["xlsx","xls"])
 if not excel_file:
     st.info("Cargá el Excel para comenzar. La portada usa la imagen de la ruta indicada en la barra lateral.")
     st.stop()
 
-# Si eligen una hoja específica
+# Procesar hojas
 if modo_hojas == "Elegir una":
     xls_names = pd.ExcelFile(excel_file, engine="openpyxl").sheet_names
     hoja_sel = st.selectbox("Hoja a procesar", xls_names)
-    xls_bytes = excel_file
-    df = pd.read_excel(xls_bytes, sheet_name=hoja_sel, header=None, engine="openpyxl")
-    regs = parse_sheet(df, hoja_sel)
+    df_hoja = pd.read_excel(excel_file, sheet_name=hoja_sel, header=None, engine="openpyxl")
+    regs = parse_sheet(df_hoja, hoja_sel)
 else:
     regs = parse_workbook(excel_file)
 
 st.caption(f"Filas detectadas (todas las hojas seleccionadas): **{len(regs)}**")
 
-# aplicar filtro municipal
+# Aplicar filtro municipal
 if filtro == "Líder contiene":
     regs_f = regs[regs["lider"].apply(es_muni)]
 elif filtro == "Líder o Co-gestores":
@@ -296,7 +346,7 @@ st.dataframe((regs_f if not regs_f.empty else regs)[cols], use_container_width=T
 
 if st.button("Generar PDF editable"):
     data = regs_f if not regs_f.empty else regs
-    pdf_bytes = build_pdf(data, ruta_img or None)
+    pdf_bytes = build_pdf_grouped(data, ruta_img or None)
     st.success("PDF generado.")
     st.download_button("⬇️ Descargar PDF", data=pdf_bytes, file_name="Informe_Seguimiento_GobiernoLocal.pdf", mime="application/pdf")
 
