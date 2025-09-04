@@ -1,6 +1,7 @@
-# app.py — Parser por contenido + multi-hoja + PDF agrupado con único campo editable ("Resultado")
+# app.py — PDF agrupado: cada Problemática inicia página. Imagen de portada detectada automáticamente.
 import io, re, unicodedata
 from typing import Dict, List, Optional, Tuple
+from pathlib import Path
 
 import streamlit as st
 import pandas as pd
@@ -29,7 +30,8 @@ Subí tu **Excel** (una o varias hojas). La app detecta por **contenido**:
 - **Cadena de Resultados**, **Línea de acción #**  
 - Encabezados: **Acciones**, **Indicador** (*o* **Productos/Servicios**), **Meta** (*o* **Efectos**), **Líder Estratégico**, **Co-gestores**  
 - Filtrado por **Municipalidad** (estricto o amplio)  
-- El **PDF** muestra *Problemática* y *Línea* **una sola vez** y luego **fichas** por acción con **Resultado** como único campo editable.
+- En el **PDF**: **cada Problemática inicia en una página nueva**; luego se imprimen sus **Líneas** y **fichas** por Acción.  
+- La **imagen de portada** se toma **automáticamente** del repo (no tenés que escribir rutas).
 """
 )
 
@@ -57,9 +59,9 @@ def _find_any(cell: str, keys: List[str]) -> bool:
 
 def find_header_in_row(row_vals: List[str]) -> Dict[str, int]:
     """
-    Dada una fila, intenta ubicar columnas por texto.
-    Devuelve dict con indices: accion, indicador, meta, lider, cogestores, consideraciones (algunas pueden no existir).
-    Para considerar "encabezado" deben existir al menos acción/indicador/meta.
+    Ubica columnas por texto. Devuelve indices:
+    accion, indicador, meta, lider, cogestores, consideraciones (algunas pueden no existir).
+    Para considerar encabezado deben existir al menos acción/indicador/meta.
     """
     n = len(row_vals)
     idx = {"accion": None, "indicador": None, "meta": None, "lider": None, "cogestores": None, "consideraciones": None}
@@ -82,7 +84,7 @@ def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
     """
     Recorre toda la hoja:
       - Guarda última 'Cadena de Resultados' y 'Línea de acción #'
-      - Detecta fila de encabezados (acepta sinónimos)
+      - Detecta encabezado (sinónimos)
       - Extrae filas de datos hasta que se vacían las columnas clave
     Devuelve: problematica, linea_accion, accion_estrategica, indicador, meta, lider, cogestores, hoja
     """
@@ -96,7 +98,7 @@ def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
     while i < nrows:
         row_vals = [S.iat[i, j].strip() for j in range(ncols)]
 
-        # Actualizar contexto si en esta fila aparece una nueva Cadena/Línea
+        # Actualizar contexto si aparece Cadena/Línea
         for j in range(ncols):
             cell = row_vals[j]
             if RE_CADENA.match(cell):
@@ -107,11 +109,11 @@ def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
         # Detectar encabezado
         hdr = find_header_in_row(row_vals)
         if hdr:
-            # Leer filas de datos hacia abajo
+            # Filas de datos hacia abajo
             i += 1
             while i < nrows:
                 row_vals = [S.iat[i, j].strip() for j in range(ncols)]
-                # Contexto puede volver a actualizarse más abajo
+                # Contexto puede actualizarse más abajo
                 for j in range(ncols):
                     cell = row_vals[j]
                     if RE_CADENA.match(cell):
@@ -128,8 +130,7 @@ def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
                 lid  = get(hdr.get("lider"))
                 cog  = get(hdr.get("cogestores"))
 
-                # fin del bloque si no hay datos en las 3 clave
-                if not any([acc, ind, meta]):
+                if not any([acc, ind, meta]):  # fin bloque
                     break
 
                 rows.append({
@@ -162,7 +163,34 @@ def parse_workbook(xls_bytes) -> pd.DataFrame:
         return pd.concat(todo, ignore_index=True)
     return pd.DataFrame(columns=["problematica","linea_accion","accion_estrategica","indicador","meta","lider","cogestores","hoja"])
 
-# ========= Helpers PDF (agrupado) =========
+# ========= Detección automática de imagen de portada =========
+def autodetect_cover_image() -> Optional[str]:
+    """
+    Busca en el repo una imagen candidata a portada.
+    Prioriza nombres que contengan: encabezado, portada, header.
+    Extensiones soportadas: png, jpg, jpeg, webp.
+    """
+    root = Path.cwd()
+    patterns = ["*encabezado.*", "*portada.*", "*header.*"]
+    exts = {".png", ".jpg", ".jpeg", ".webp"}
+
+    # Buscar primero en ./ y ./assets
+    candidates: List[Path] = []
+    for base in [root, root / "assets"]:
+        if base.exists():
+            for pat in patterns:
+                candidates += list(base.glob(pat))
+    # Si no hay, buscar recursivo
+    if not candidates:
+        for pat in patterns:
+            candidates += list(root.rglob(pat))
+
+    # Filtrar por extensiones válidas
+    candidates = [p for p in candidates if p.suffix.lower() in exts]
+
+    return str(candidates[0]) if candidates else None
+
+# ========= Helpers PDF (agrupado por PROBLEMÁTICA, cada una inicia página) =========
 def portada(c: canvas.Canvas, image_path: Optional[str]):
     y_top = A4[1] - 2.5*cm
     if image_path:
@@ -223,19 +251,10 @@ def ensure_space(c, y, need, page, total):
     return y, page
 
 def ficha_accion(c, x, y, w, idx, fila) -> float:
-    """
-    Tarjeta por Acción Estratégica con:
-    - Acción Estratégica
-    - Indicador
-    - Meta
-    - Líder Estratégico
-    - Resultado (editable)
-    """
-    # Marco de ficha
+    """Tarjeta por Acción con Resultado editable."""
     c.setStrokeColor(BORDE); c.setFillColor(colors.white)
     c.rect(x, y-5.8*cm, w, 5.8*cm, fill=0, stroke=1)
 
-    # Encabezado de la ficha
     c.setFillColor(AZUL_CLARO); c.rect(x, y-0.9*cm, w, 0.9*cm, fill=1, stroke=0)
     c.setFillColor(AZUL_OSCURO); c.setFont("Helvetica-Bold", 11)
     c.drawString(x+0.2*cm, y-0.6*cm, f"Acción #{idx}")
@@ -249,7 +268,6 @@ def ficha_accion(c, x, y, w, idx, fila) -> float:
     y_text -= 0.2*cm
     y_text = kv_item(c, x+0.2*cm, y_text, w-0.4*cm, "Líder Estratégico", fila.get("lider",""))
 
-    # Resultado (único editable)
     alto = 2.2*cm
     c.setFillColor(AZUL_CLARO)
     c.rect(x+0.2*cm, y_text-0.7*cm, w-0.4*cm, 0.7*cm, fill=1, stroke=0)
@@ -267,57 +285,76 @@ def ficha_accion(c, x, y, w, idx, fila) -> float:
     )
     return y_text-(alto+1.4*cm)
 
-def build_pdf_grouped(rows: pd.DataFrame, image_path: Optional[str]) -> bytes:
+def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str]) -> bytes:
     """
-    Para cada (Problemática, Línea): imprime Problemática y Línea UNA sola vez
-    y luego N fichas (una por acción) con Resultado editable.
+    AGRUPA por PROBLEMÁTICA.
+    - Cada problemática inicia en una página nueva (encabezado al tope).
+    - Dentro, agrupa por Línea de acción: se imprime la línea una sola vez y sus fichas.
     """
     buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=A4)
     portada(c, image_path)
 
-    # Agrupar por (problematica, linea_accion)
-    grupos = []
+    # Agrupar primero por problemática, preservando orden de aparición
     if rows.empty:
-        grupos = [(("", ""), rows)]
+        groups = [("", rows)]
     else:
-        for (prob, lin), g in rows.groupby(["problematica","linea_accion"], dropna=False):
-            grupos.append(((prob or ""), (lin or ""), g.reset_index(drop=True)))
+        # groupby preserva orden en pandas recientes, de todas formas usamos keys en orden de aparición
+        probs_in_order = list(dict.fromkeys(rows["problematica"].fillna("").tolist()))
+        groups = [(p, rows[rows["problematica"] == p]) for p in probs_in_order]
 
-    total = 1 + max(1, len(grupos))
-    page = 1; header(c, page, total)
-    x = 1.4*cm; w = A4[0]-2.8*cm; y = A4[1]-3.6*cm
+    # estimación simple de total de páginas
+    total = 1 + max(1, len(groups))
+    page = 0  # vamos a crear página al inicio de cada problemática
 
-    for (prob, lin, gdf) in grupos:
-        # Cabeceras del bloque (una sola vez)
-        y, page = ensure_space(c, y, 4.0*cm, page, total)
+    for prob, df_prob in groups:
+        # NUEVA PÁGINA para esta problemática
+        page += 1
+        c.showPage() if page > 1 else None
+        header(c, page, total)
+        x = 1.4*cm; w = A4[0]-2.8*cm; y = A4[1]-3.6*cm
+
+        # Bloque de problemática (arranca arriba)
         y = section_bar(c, x, y, w, "Cadena de Resultados / Problemática")
-        y = wrap_text(c, prob, x+0.2*cm, y, w-0.4*cm)
+        y = wrap_text(c, prob or "", x+0.2*cm, y, w-0.4*cm)
         y -= 0.2*cm
-        y = section_bar(c, x, y, w, "Línea de acción")
-        y = wrap_text(c, lin, x+0.2*cm, y, w-0.4*cm)
-        y -= 0.3*cm
 
-        # Fichas de acciones
-        for idx, fila in gdf.iterrows():
-            y, page = ensure_space(c, y, 7.0*cm, page, total)
-            y = ficha_accion(c, x, y, w, idx+1, fila)
+        # Sub-agrupación por línea
+        if df_prob.empty:
+            footer(c); continue
 
-        # Separación entre bloques
-        y -= 0.6*cm
-        if y < 4*cm:
-            footer(c); c.showPage(); page += 1; header(c, page, total); y = A4[1]-3.6*cm
+        lineas_in_order = list(dict.fromkeys(df_prob["linea_accion"].fillna("").tolist()))
+        for lin in lineas_in_order:
+            gdf = df_prob[df_prob["linea_accion"] == lin].reset_index(drop=True)
 
-    footer(c); c.save(); buf.seek(0); return buf.read()
+            y, page = ensure_space(c, y, 3.0*cm, page, total)
+            y = section_bar(c, x, y, w, "Línea de acción")
+            y = wrap_text(c, lin or "", x+0.2*cm, y, w-0.4*cm)
+            y -= 0.3*cm
+
+            # Fichas de acciones para esta línea
+            for idx, fila in gdf.iterrows():
+                y, page = ensure_space(c, y, 7.0*cm, page, total)
+                y = ficha_accion(c, x, y, w, idx+1, fila)
+
+        footer(c)
+
+    c.save(); buf.seek(0); return buf.read()
 
 # ========= UI =========
 with st.sidebar:
-    ruta_img = st.text_input("Ruta imagen portada (en tu repo)", value="assets/encabezado.png")
+    # Imagen detectada automáticamente
+    cover_path = autodetect_cover_image()
+    if cover_path:
+        st.success(f"Imagen detectada: `{Path(cover_path).as_posix()}`")
+    else:
+        st.warning("No se detectó imagen de portada automáticamente. Colocá un archivo llamado 'encabezado.*', 'portada.*' o 'header.*' en el repo.")
+
     filtro = st.selectbox("Filtrar municipalidad", ["Líder contiene", "Líder o Co-gestores", "Sin filtro"])
     modo_hojas = st.radio("Hojas a procesar", ["Todas", "Elegir una"])
 
 excel_file = st.file_uploader("Subí tu Excel (multipestaña o una sola)", type=["xlsx","xls"])
 if not excel_file:
-    st.info("Cargá el Excel para comenzar. La portada usa la imagen de la ruta indicada en la barra lateral.")
+    st.info("Cargá el Excel para comenzar. La portada usa la imagen detectada automáticamente.")
     st.stop()
 
 # Procesar hojas
@@ -346,7 +383,7 @@ st.dataframe((regs_f if not regs_f.empty else regs)[cols], use_container_width=T
 
 if st.button("Generar PDF editable"):
     data = regs_f if not regs_f.empty else regs
-    pdf_bytes = build_pdf_grouped(data, ruta_img or None)
+    pdf_bytes = build_pdf_grouped_by_problem(data, cover_path)
     st.success("PDF generado.")
     st.download_button("⬇️ Descargar PDF", data=pdf_bytes, file_name="Informe_Seguimiento_GobiernoLocal.pdf", mime="application/pdf")
 
