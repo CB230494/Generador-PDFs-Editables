@@ -1,4 +1,4 @@
-# app.py — Numeración simple 1,2,3... | campos únicos | "Gobierno Local de <CANTÓN>" desde el nombre del Excel
+# app.py — "Gobierno Local de <CANTÓN>" desde el nombre del archivo (toma el segmento antes de " - ")
 import io, re, unicodedata
 from typing import Dict, List, Optional
 from pathlib import Path
@@ -28,8 +28,7 @@ st.markdown("""
 - **Divide** una acción en **múltiples fichas** (una por **Indicador**) y **arrastra** Acción/Meta/Líder dentro del bloque si vienen en celdas combinadas.
 - **Sólo** incluye fichas con **Líder municipal**.
 - Numeración **simple**: **Acción #1, #2, #3, …** (sin 2.1).
-- En el PDF: cada **Problemática** arranca **página nueva**; luego sus **Líneas** y **fichas**.
-- La portada se detecta automáticamente (archivos `imagen23.*`, `encabezado.*`, `portada.*`, `header.*`).
+- Portada autodetectada (`imagen23.*`, `encabezado.*`, `portada.*`, `header.*`) y subtítulo **“Gobierno Local de <CANTÓN>”** desde el nombre del archivo.
 """)
 
 # ========= Utils =========
@@ -220,27 +219,26 @@ def autodetect_cover_image() -> Optional[str]:
     cands = [p for p in cands if p.suffix.lower() in exts]
     return str(cands[0]) if cands else None
 
-# ========= Extra: "Gobierno Local de <CANTÓN>" desde el nombre del archivo =========
+# ========= "Gobierno Local de <CANTÓN>" desde el nombre del archivo =========
 def guess_canton_from_filename(filename: str) -> str:
     """
-    Heurística:
-    - toma el nombre sin extensión,
-    - si hay ' - ' usa el último segmento,
-    - elimina [entre corchetes], 'versión', 'final', 'modificado', etc.,
-    - devuelve la PRIMERA palabra capitalizada de ese segmento.
+    Regla principal: si el nombre tiene ' - ', usa el **primer segmento** antes del guion.
+      p.ej. 'Curridabat - Matriz Cadena...' -> 'Curridabat'
+    Si no hay guion, aplica un fallback que intenta detectar una palabra de cantón.
     """
     base = Path(filename).stem.replace("_", " ").strip()
-    seg = base.split(" - ")[-1].strip() if " - " in base else base
-    seg = re.sub(r"\[.*?\]", "", seg, flags=re.U)  # quitar [Vista protegida], etc.
-    seg = re.sub(r"(?i)\b(modificado|version|versi[oó]n|final|oficial|vista|protegida)\b", "", seg).strip()
-    # tomar la primera palabra con inicial mayúscula (o todo si una sola)
-    tokens = [t for t in seg.split() if t]
-    if not tokens: return ""
-    # elegimos la primera que empiece con letra (no D29, etc.)
-    for t in tokens:
-        if re.match(r"[A-Za-zÁÉÍÓÚÑ]", t):
-            return t.capitalize()
-    return tokens[0].capitalize()
+    if " - " in base:
+        left = base.split(" - ")[0].strip()
+        # limpiar espacios y capitalizar gentilmente (Limón/Limon)
+        left = left.title()
+        # preservar acentos si ya vienen (no los tocamos)
+        return left
+
+    # Fallback: quitar etiquetas y palabras genéricas y tomar la primera Capitalizada
+    seg = re.sub(r"\[.*?\]", "", base, flags=re.U)
+    seg = re.sub(r"(?i)\b(matriz|cadena|resultados|lineas|líneas|accion|acción|version|versi[oó]n|final|modificado|oficial|vista|protegida|d\d+)\b", "", seg)
+    tokens = [t for t in seg.split() if re.match(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", t)]
+    return tokens[0].capitalize() if tokens else ""
 
 # ========= PDF helpers =========
 def portada(c: canvas.Canvas, image_path: Optional[str], canton: str):
@@ -303,14 +301,14 @@ def ensure_space(c, y, need, page, total):
         return A4[1]-3.6*cm, page+1
     return y, page
 
-def ficha_accion(c, x, y, w, label, fila, field_name: str) -> float:
-    """Tarjeta por Acción con Resultado editable."""
+def ficha_accion(c, x, y, w, idx, fila, field_name: str) -> float:
+    """Tarjeta por Acción con Resultado editable (campo independiente)."""
     c.setStrokeColor(BORDE); c.setFillColor(colors.white)
     c.rect(x, y-5.8*cm, w, 5.8*cm, fill=0, stroke=1)
 
     c.setFillColor(AZUL_CLARO); c.rect(x, y-0.9*cm, w, 0.9*cm, fill=1, stroke=0)
     c.setFillColor(AZUL_OSCURO); c.setFont("Helvetica-Bold", 11)
-    c.drawString(x+0.2*cm, y-0.6*cm, f"Acción #{label}")
+    c.drawString(x+0.2*cm, y-0.6*cm, f"Acción #{idx}")
 
     y_text = y-1.3*cm
     y_text = kv_item(c, x+0.2*cm, y_text, w-0.4*cm, "Acción Estratégica", fila.get("accion_estrategica",""))
@@ -328,11 +326,10 @@ def ficha_accion(c, x, y, w, label, fila, field_name: str) -> float:
     c.drawString(x+0.35*cm, y_text-0.45*cm, "Resultado (rellenable por Gobierno Local)")
     c.setStrokeColor(BORDE)
     c.rect(x+0.2*cm, y_text-(alto+1.0*cm), w-0.4*cm, alto, fill=0, stroke=1)
-
-    # ⚠️ Nombre ÚNICO para evitar que se replique el texto entre campos
+    # nombre ÚNICO para evitar textos replicados
     c.acroForm.textfield(
         name=field_name,
-        tooltip=f"Resultado acción {label}",
+        tooltip=f"Resultado acción {idx}",
         x=x+0.25*cm, y=y_text-(alto+1.0*cm)+0.1*cm,
         width=w-0.5*cm, height=alto-0.2*cm,
         borderStyle="inset", borderWidth=1, forceBorder=True,
@@ -352,7 +349,7 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], 
 
     total = 1 + max(1, len(groups))
     page = 0
-    unique_field_counter = 0  # <- contador global de campos para nombres únicos
+    unique_field_counter = 0  # para nombres de campos únicos en todo el PDF
 
     for prob, df_prob in groups:
         page += 1
@@ -402,7 +399,7 @@ if not excel_file:
     st.info("Cargá el Excel para comenzar.")
     st.stop()
 
-# Nombre del cantón desde el nombre del archivo
+# Nombre del cantón desde el nombre del archivo (usa el segmento a la izquierda del ' - ')
 canton_name = guess_canton_from_filename(excel_file.name)
 
 xls = pd.ExcelFile(excel_file, engine="openpyxl")
