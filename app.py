@@ -221,11 +221,6 @@ def autodetect_cover_image() -> Optional[str]:
 
 # ========= "Gobierno Local de <CANTÓN>" desde el nombre del archivo =========
 def guess_canton_from_filename(filename: str) -> str:
-    """
-    Regla principal: si el nombre tiene ' - ', usa el **primer segmento** antes del guion.
-      p.ej. 'Curridabat - Matriz Cadena...' -> 'Curridabat'
-    Si no hay guion, aplica un fallback que intenta detectar una palabra de cantón.
-    """
     base = Path(filename).stem.replace("_", " ").strip()
     if " - " in base:
         left = base.split(" - ")[0].strip()
@@ -322,7 +317,6 @@ def ficha_accion(c, x, y, w, idx, fila, field_name: str) -> float:
     c.drawString(x+0.35*cm, y_text-0.45*cm, "Resultado (rellenable por Gobierno Local)")
     c.setStrokeColor(BORDE)
     c.rect(x+0.2*cm, y_text-(alto+1.0*cm), w-0.4*cm, alto, fill=0, stroke=1)
-    # nombre ÚNICO para evitar textos replicados
     c.acroForm.textfield(
         name=field_name,
         tooltip=f"Resultado acción {idx}",
@@ -333,8 +327,10 @@ def ficha_accion(c, x, y, w, idx, fila, field_name: str) -> float:
     )
     return y_text-(alto+1.4*cm)
 
+# ⬇️ CAMBIO: esta página ahora **empieza con un salto de página** para que no se superponga con la última acción
 def trimestre_page(c: canvas.Canvas, page: int, total: int):
     """Página final con campo editable para indicar a qué trimestre(s) corresponde el informe."""
+    c.showPage()                 # <-- Forzar página nueva ANTES de dibujar el bloque
     header(c, page, total)
     x = 1.4*cm; w = A4[0]-2.8*cm; y = A4[1]-3.6*cm
 
@@ -342,21 +338,19 @@ def trimestre_page(c: canvas.Canvas, page: int, total: int):
     y = wrap_text(c, "Indique el/los trimestre(s) a los que corresponde este informe (por ejemplo: T1 2025, T1–T2 2025).",
                   x+0.2*cm, y, w-0.4*cm)
 
-    # Caja grande para escribir
     alto = 3.0*cm
     c.setStrokeColor(BORDE)
     c.rect(x+0.2*cm, y-(alto+0.6*cm), w-0.4*cm, alto, fill=0, stroke=1)
     c.acroForm.textfield(
-        name="periodo_trimestres",  # único para todo el documento
+        name="periodo_trimestres",
         tooltip="Periodo del informe (trimestres)",
         x=x+0.25*cm, y=y-(alto+0.6*cm)+0.1*cm,
         width=w-0.5*cm, height=alto-0.2*cm,
         borderStyle="inset", borderWidth=1, forceBorder=True,
         fontName="Helvetica", fontSize=11, fieldFlags=FF_MULTILINE
     )
-
     footer(c)
-    c.showPage()
+    # (no showPage aquí)
 
 def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], canton: str) -> bytes:
     buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=A4)
@@ -371,7 +365,7 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], 
     # +1 por la página final de "Periodo del informe"
     total = 1 + max(1, len(groups)) + 1
     page = 0
-    unique_field_counter = 0  # para nombres de campos únicos en todo el PDF
+    unique_field_counter = 0
 
     for prob, df_prob in groups:
         page += 1
@@ -395,12 +389,12 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], 
             y = wrap_text(c, lin or "", x+0.2*cm, y, w-0.4*cm)
             y -= 0.3*cm
 
-            # Numeración SIMPLE 1,2,3... por línea:
+            # Numeración simple por línea
             num_simple = 1
             for _, fila in gdf.iterrows():
                 y, page = ensure_space(c, y, 7.0*cm, page, total)
                 unique_field_counter += 1
-                field_name = f"resultado_{unique_field_counter}"  # siempre único
+                field_name = f"resultado_{unique_field_counter}"
                 y = ficha_accion(c, x, y, w, str(num_simple), fila, field_name)
                 num_simple += 1
 
@@ -451,6 +445,5 @@ if st.button("Generar PDF editable"):
     pdf = build_pdf_grouped_by_problem(regs_muni, cover_path, canton_name)
     st.success("PDF generado.")
     st.download_button("⬇️ Descargar PDF", data=pdf, file_name=f"Informe_Seguimiento_GobiernoLocal_{canton_name or 'PDF'}.pdf", mime="application/pdf")
-
 
 
