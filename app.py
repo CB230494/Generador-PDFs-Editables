@@ -229,12 +229,8 @@ def guess_canton_from_filename(filename: str) -> str:
     base = Path(filename).stem.replace("_", " ").strip()
     if " - " in base:
         left = base.split(" - ")[0].strip()
-        # limpiar espacios y capitalizar gentilmente (Limón/Limon)
         left = left.title()
-        # preservar acentos si ya vienen (no los tocamos)
         return left
-
-    # Fallback: quitar etiquetas y palabras genéricas y tomar la primera Capitalizada
     seg = re.sub(r"\[.*?\]", "", base, flags=re.U)
     seg = re.sub(r"(?i)\b(matriz|cadena|resultados|lineas|líneas|accion|acción|version|versi[oó]n|final|modificado|oficial|vista|protegida|d\d+)\b", "", seg)
     tokens = [t for t in seg.split() if re.match(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", t)]
@@ -337,6 +333,31 @@ def ficha_accion(c, x, y, w, idx, fila, field_name: str) -> float:
     )
     return y_text-(alto+1.4*cm)
 
+def trimestre_page(c: canvas.Canvas, page: int, total: int):
+    """Página final con campo editable para indicar a qué trimestre(s) corresponde el informe."""
+    header(c, page, total)
+    x = 1.4*cm; w = A4[0]-2.8*cm; y = A4[1]-3.6*cm
+
+    y = section_bar(c, x, y, w, "Periodo del informe")
+    y = wrap_text(c, "Indique el/los trimestre(s) a los que corresponde este informe (por ejemplo: T1 2025, T1–T2 2025).",
+                  x+0.2*cm, y, w-0.4*cm)
+
+    # Caja grande para escribir
+    alto = 3.0*cm
+    c.setStrokeColor(BORDE)
+    c.rect(x+0.2*cm, y-(alto+0.6*cm), w-0.4*cm, alto, fill=0, stroke=1)
+    c.acroForm.textfield(
+        name="periodo_trimestres",  # único para todo el documento
+        tooltip="Periodo del informe (trimestres)",
+        x=x+0.25*cm, y=y-(alto+0.6*cm)+0.1*cm,
+        width=w-0.5*cm, height=alto-0.2*cm,
+        borderStyle="inset", borderWidth=1, forceBorder=True,
+        fontName="Helvetica", fontSize=11, fieldFlags=FF_MULTILINE
+    )
+
+    footer(c)
+    c.showPage()
+
 def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], canton: str) -> bytes:
     buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=A4)
     portada(c, image_path, canton)
@@ -347,7 +368,8 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], 
         probs_order = list(dict.fromkeys(rows["problematica"].fillna("").tolist()))
         groups = [(p, rows[rows["problematica"] == p]) for p in probs_order]
 
-    total = 1 + max(1, len(groups))
+    # +1 por la página final de "Periodo del informe"
+    total = 1 + max(1, len(groups)) + 1
     page = 0
     unique_field_counter = 0  # para nombres de campos únicos en todo el PDF
 
@@ -383,6 +405,10 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], 
                 num_simple += 1
 
         footer(c)
+
+    # Página final: periodo de informe (trimestre/s)
+    page += 1
+    trimestre_page(c, page, total)
 
     c.save(); buf.seek(0); return buf.read()
 
@@ -425,5 +451,6 @@ if st.button("Generar PDF editable"):
     pdf = build_pdf_grouped_by_problem(regs_muni, cover_path, canton_name)
     st.success("PDF generado.")
     st.download_button("⬇️ Descargar PDF", data=pdf, file_name=f"Informe_Seguimiento_GobiernoLocal_{canton_name or 'PDF'}.pdf", mime="application/pdf")
+
 
 
