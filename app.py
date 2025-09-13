@@ -221,12 +221,23 @@ def autodetect_cover_image() -> Optional[str]:
 
 # ========= "Gobierno Local de <CANTÓN>" desde el nombre del archivo =========
 def guess_canton_from_filename(filename: str) -> str:
-    base = Path(filename).stem.replace("_", " ").strip()
-    if " - " in base:
-        left = base.split(" - ")[0].strip()
-        left = left.title()
-        return left
-    seg = re.sub(r"\[.*?\]", "", base, flags=re.U)
+    base = Path(filename).stem.strip()
+
+    # Prioridad: si contiene "  ESS" (dos espacios + ESS), usar todo lo anterior
+    m = re.split(r"\s{2,}ESS\b", base, flags=re.IGNORECASE)
+    if len(m) >= 2:
+        left = m[0].strip().replace("_", " ")
+        # Capitalizar respetando tildes; mantener siglas completas si vienen en MAYÚSCULAS
+        return " ".join(w.capitalize() if not re.match(r"^[A-ZÁÉÍÓÚÑ]{2,}$", w) else w for w in left.split())
+
+    # Regla anterior: usar el segmento a la izquierda de " - " si existe
+    base2 = base.replace("_", " ")
+    if " - " in base2:
+        left = base2.split(" - ")[0].strip()
+        return " ".join(s.capitalize() for s in left.split())
+
+    # Fallback: limpiar palabras comunes y tomar primer token alfabético
+    seg = re.sub(r"\[.*?\]", "", base2, flags=re.U)
     seg = re.sub(r"(?i)\b(matriz|cadena|resultados|lineas|líneas|accion|acción|version|versi[oó]n|final|modificado|oficial|vista|protegida|d\d+)\b", "", seg)
     tokens = [t for t in seg.split() if re.match(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", t)]
     return tokens[0].capitalize() if tokens else ""
@@ -248,7 +259,8 @@ def portada(c: canvas.Canvas, image_path: Optional[str], canton: str):
     c.setFillColor(AZUL_OSCURO)
     c.setFont("Helvetica-Bold", 28); c.drawCentredString(A4[0]/2, y_top-1.6*cm, "INFORME DE SEGUIMIENTO")
     c.setFont("Helvetica-Bold", 22)
-    titulo = f"Gobierno Local de {canton}" if canton else "Gobierno Local"
+    # CAMBIO: mostrar “Municipalidad de …”
+    titulo = f"Municipalidad de {canton}" if canton else "Municipalidad"
     c.drawCentredString(A4[0]/2, y_top-3.1*cm, titulo)
     c.setFont("Helvetica", 11); c.setFillColor(NEGRO); c.drawCentredString(A4[0]/2, y_top-4.6*cm, "Sembremos Seguridad")
     c.showPage()
