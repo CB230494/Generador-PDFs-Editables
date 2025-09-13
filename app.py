@@ -221,22 +221,27 @@ def autodetect_cover_image() -> Optional[str]:
 
 # ========= "Gobierno Local de <CANTÓN>" desde el nombre del archivo =========
 def guess_canton_from_filename(filename: str) -> str:
+    """
+    Regla prioritaria: si el nombre del archivo contiene '  ESS' (dos espacios seguidos, case-insensitive),
+    se toma TODO lo que esté a la izquierda como el nombre del cantón.
+    Ejemplo: 'Montes de Oca  ESS T1 2025.xlsx' -> 'Montes de Oca'
+    """
     base = Path(filename).stem.strip()
 
-    # Prioridad: si contiene "  ESS" (dos espacios + ESS), usar todo lo anterior
+    # 1) Prioridad: dos espacios + 'ESS' (insensible a mayúsculas)
     m = re.split(r"\s{2,}ESS\b", base, flags=re.IGNORECASE)
     if len(m) >= 2:
         left = m[0].strip().replace("_", " ")
-        # Capitalizar respetando tildes; mantener siglas completas si vienen en MAYÚSCULAS
+        # Capitalizar respetando tildes; mantener siglas si vienen en MAYÚSCULAS
         return " ".join(w.capitalize() if not re.match(r"^[A-ZÁÉÍÓÚÑ]{2,}$", w) else w for w in left.split())
 
-    # Regla anterior: usar el segmento a la izquierda de " - " si existe
+    # 2) Regla anterior: usar el segmento a la izquierda de ' - ' si existe
     base2 = base.replace("_", " ")
     if " - " in base2:
         left = base2.split(" - ")[0].strip()
         return " ".join(s.capitalize() for s in left.split())
 
-    # Fallback: limpiar palabras comunes y tomar primer token alfabético
+    # 3) Fallback: limpiar palabras comunes y tomar primer token “alfabético”
     seg = re.sub(r"\[.*?\]", "", base2, flags=re.U)
     seg = re.sub(r"(?i)\b(matriz|cadena|resultados|lineas|líneas|accion|acción|version|versi[oó]n|final|modificado|oficial|vista|protegida|d\d+)\b", "", seg)
     tokens = [t for t in seg.split() if re.match(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", t)]
@@ -259,8 +264,7 @@ def portada(c: canvas.Canvas, image_path: Optional[str], canton: str):
     c.setFillColor(AZUL_OSCURO)
     c.setFont("Helvetica-Bold", 28); c.drawCentredString(A4[0]/2, y_top-1.6*cm, "INFORME DE SEGUIMIENTO")
     c.setFont("Helvetica-Bold", 22)
-    # CAMBIO: mostrar “Municipalidad de …”
-    titulo = f"Municipalidad de {canton}" if canton else "Municipalidad"
+    titulo = f"Gobierno Local de {canton}" if canton else "Gobierno Local"
     c.drawCentredString(A4[0]/2, y_top-3.1*cm, titulo)
     c.setFont("Helvetica", 11); c.setFillColor(NEGRO); c.drawCentredString(A4[0]/2, y_top-4.6*cm, "Sembremos Seguridad")
     c.showPage()
@@ -339,10 +343,10 @@ def ficha_accion(c, x, y, w, idx, fila, field_name: str) -> float:
     )
     return y_text-(alto+1.4*cm)
 
-# ⬇️ CAMBIO: esta página ahora **empieza con un salto de página** para que no se superponga con la última acción
+# ⬇️ Esta página empieza con salto para no superponerse con la última acción
 def trimestre_page(c: canvas.Canvas, page: int, total: int):
     """Página final con campo editable para indicar a qué trimestre(s) corresponde el informe."""
-    c.showPage()                 # <-- Forzar página nueva ANTES de dibujar el bloque
+    c.showPage()                 # Forzar página nueva ANTES de dibujar el bloque
     header(c, page, total)
     x = 1.4*cm; w = A4[0]-2.8*cm; y = A4[1]-3.6*cm
 
@@ -431,7 +435,7 @@ if not excel_file:
     st.info("Cargá el Excel para comenzar.")
     st.stop()
 
-# Nombre del cantón desde el nombre del archivo (usa el segmento a la izquierda del ' - ')
+# Nombre del cantón desde el nombre del archivo (usa el segmento a la izquierda del ' - ' o antes de '  ESS')
 canton_name = guess_canton_from_filename(excel_file.name)
 
 xls = pd.ExcelFile(excel_file, engine="openpyxl")
@@ -445,7 +449,7 @@ else:
 
 st.caption(f"Filas detectadas: **{len(regs)}**")
 
-# 🔒 Sólo Municipalidad
+# 🔒 Sólo Municipalidad (líder municipal)
 regs_muni = regs[regs["lider"].apply(es_muni)].reset_index(drop=True)
 st.caption(f"Filas después del filtro (sólo Municipalidad): **{len(regs_muni)}**")
 
@@ -457,5 +461,4 @@ if st.button("Generar PDF editable"):
     pdf = build_pdf_grouped_by_problem(regs_muni, cover_path, canton_name)
     st.success("PDF generado.")
     st.download_button("⬇️ Descargar PDF", data=pdf, file_name=f"Informe_Seguimiento_GobiernoLocal_{canton_name or 'PDF'}.pdf", mime="application/pdf")
-
 
