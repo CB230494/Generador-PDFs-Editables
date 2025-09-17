@@ -339,7 +339,8 @@ def ficha_accion(c, x, y, w, idx, fila, field_name: str) -> float:
         x=x+0.25*cm, y=y_text-(alto+1.0*cm)+0.1*cm,
         width=w-0.5*cm, height=alto-0.2*cm,
         borderStyle="inset", borderWidth=1, forceBorder=True,
-        fontName="Helvetica", fontSize=10, fieldFlags=FF_MULTILINE
+        fontName="Helvetica", fontSize=10, fieldFlags=FF_MULTILINE,
+        maxlen=0  # ⬅️ SIN LÍMITE DE CARACTERES
     )
     return y_text-(alto+1.4*cm)
 
@@ -363,7 +364,8 @@ def trimestre_page(c: canvas.Canvas, page: int, total: int):
         x=x+0.25*cm, y=y-(alto+0.6*cm)+0.1*cm,
         width=w-0.5*cm, height=alto-0.2*cm,
         borderStyle="inset", borderWidth=1, forceBorder=True,
-        fontName="Helvetica", fontSize=11, fieldFlags=FF_MULTILINE
+        fontName="Helvetica", fontSize=11, fieldFlags=FF_MULTILINE,
+        maxlen=0  # ⬅️ SIN LÍMITE DE CARACTERES
     )
     footer(c)
     # (no showPage aquí)
@@ -461,4 +463,3 @@ if st.button("Generar PDF editable"):
     pdf = build_pdf_grouped_by_problem(regs_muni, cover_path, canton_name)
     st.success("PDF generado.")
     st.download_button("⬇️ Descargar PDF", data=pdf, file_name=f"Informe_Seguimiento_GobiernoLocal_{canton_name or 'PDF'}.pdf", mime="application/pdf")
-
