@@ -454,9 +454,12 @@ else:
 
 st.caption(f"Filas detectadas: **{len(regs)}**")
 
-# 🔒 Sólo Municipalidad (líder municipal)
-regs_muni = regs[regs["lider"].apply(es_muni)].reset_index(drop=True)
-st.caption(f"Filas después del filtro (sólo Municipalidad): **{len(regs_muni)}**")
+# 🔒 Filtro ACTUALIZADO — si al menos un indicador de la misma ACCIÓN tiene líder municipal,
+# entonces TODA la acción pasa el filtro (se conservan todas sus subfilas)
+mask = regs.groupby("accion_estrategica")["lider"].transform(lambda col: any(es_muni(v) for v in col))
+regs_muni = regs[mask].reset_index(drop=True)
+
+st.caption(f"Filas después del filtro (acciones con al menos un líder municipal): **{len(regs_muni)}**")
 
 st.subheader("Vista previa")
 cols = ["hoja","problematica","linea_accion","accion_estrategica","indicador","meta","lider","cogestores"]
