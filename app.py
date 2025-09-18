@@ -168,9 +168,10 @@ def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
                 lid  = get(hdr.get("lider"))
                 cog  = get(hdr.get("cogestores"))
 
-                # fin del bloque si no hay datos clave
-                if not any([acc, ind, meta]):
-                    break
+                # ⬇️ CAMBIO 1: filas totalmente vacías dentro del bloque -> saltar, NO terminar
+                if not any([acc, ind, meta, lid, cog]):
+                    i += 1
+                    continue
 
                 # forward-fill por bloque
                 if acc: last_action = acc
@@ -219,7 +220,6 @@ def autodetect_cover_image() -> Optional[str]:
     if not cands:
         for p in patterns:
             cands += list(root.rglob(p))
-    # ✅ corregido: filtrar solo extensiones válidas
     cands = [p for p in cands if p.suffix.lower() in exts]
     return str(cands[0]) if cands else None
 
@@ -457,11 +457,13 @@ else:
 
 st.caption(f"Filas detectadas: **{len(regs)}**")
 
-# ===== Clave canónica de Acción (para agrupar correctamente aunque cambie numeración o espacios)
+# ===== Clave canónica de Acción (para agrupar aunque cambie numeración/espacios/tildes)
 def _accion_key(s: str) -> str:
-    s = str(s or "")
-    s = re.sub(r"^\s*\d+[\)\.\-]*\s*", "", s, flags=re.UNICODE)  # quita "1) " / "2. " / "3- "
-    s = re.sub(r"\s+", " ", s, flags=re.UNICODE)                 # colapsa espacios
+    # ⬇️ CAMBIO 2: normaliza NBSP y tildes, quita numeración inicial y colapsa espacios
+    s = unicodedata.normalize("NFKD", str(s or "")).replace("\u00A0", " ")
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"^\s*\d+[\)\.\-]*\s*", "", s, flags=re.UNICODE)
+    s = re.sub(r"\s+", " ", s, flags=re.UNICODE)
     return s.strip().lower()
 
 regs = regs.copy()
@@ -484,7 +486,6 @@ if st.button("Generar PDF editable"):
     pdf = build_pdf_grouped_by_problem(regs_muni, cover_path, canton_name)
     st.success("PDF generado.")
     st.download_button("⬇️ Descargar PDF", data=pdf, file_name=f"Informe_Seguimiento_GobiernoLocal_{canton_name or 'PDF'}.pdf", mime="application/pdf")
-
 
 
 
