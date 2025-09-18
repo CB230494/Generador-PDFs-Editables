@@ -19,7 +19,7 @@ AZUL_CLARO  = colors.HexColor("#DCEBF7")
 BORDE       = colors.HexColor("#9BBBD9")
 NEGRO       = colors.black
 FF_MULTILINE = 4096
-MAXLEN_MUY_GRANDE = 100000  # ⬅️ para quitar límites prácticos de caracteres
+MAXLEN_MUY_GRANDE = 100000  # ⬅️ sin límite práctico de caracteres
 
 st.set_page_config(page_title="PDF editable – Gobierno Local", layout="wide")
 st.title("Generar PDF editable – Gobierno Local (Sembremos Seguridad)")
@@ -217,32 +217,28 @@ def autodetect_cover_image() -> Optional[str]:
             for p in patterns: cands += list(base.glob(p))
     if not cands:
         for p in patterns: cands += list(root.rglob(p))
+    cands = [p for p in cands si := p.suffix.lower() in exts]
     cands = [p for p in cands if p.suffix.lower() in exts]
     return str(cands[0]) if cands else None
 
 # ========= "Gobierno Local de <CANTÓN>" desde el nombre del archivo =========
 def guess_canton_from_filename(filename: str) -> str:
     """
-    Regla prioritaria: si el nombre del archivo contiene '  ESS' (dos espacios seguidos, case-insensitive),
-    se toma TODO lo que esté a la izquierda como el nombre del cantón.
-    Ejemplo: 'Montes de Oca  ESS T1 2025.xlsx' -> 'Montes de Oca'
+    Prioridad: si el nombre contiene '  ESS' (dos espacios seguidos), se toma todo a la izquierda como cantón.
+    Ej: 'Montes de Oca  ESS T1 2025.xlsx' -> 'Montes de Oca'
     """
     base = Path(filename).stem.strip()
 
-    # 1) Prioridad: dos espacios + 'ESS' (insensible a mayúsculas)
     m = re.split(r"\s{2,}ESS\b", base, flags=re.IGNORECASE)
     if len(m) >= 2:
         left = m[0].strip().replace("_", " ")
-        # Capitalizar respetando tildes; mantener siglas si vienen en MAYÚSCULAS
         return " ".join(w.capitalize() if not re.match(r"^[A-ZÁÉÍÓÚÑ]{2,}$", w) else w for w in left.split())
 
-    # 2) Regla anterior: usar el segmento a la izquierda de ' - ' si existe
     base2 = base.replace("_", " ")
     if " - " in base2:
         left = base2.split(" - ")[0].strip()
         return " ".join(s.capitalize() for s in left.split())
 
-    # 3) Fallback: limpiar palabras comunes y tomar primer token “alfabético”
     seg = re.sub(r"\[.*?\]", "", base2, flags=re.U)
     seg = re.sub(r"(?i)\b(matriz|cadena|resultados|lineas|líneas|accion|acción|version|versi[oó]n|final|modificado|oficial|vista|protegida|d\d+)\b", "", seg)
     tokens = [t for t in seg.split() if re.match(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", t)]
@@ -342,14 +338,13 @@ def ficha_accion(c, x, y, w, idx, fila, field_name: str) -> float:
         borderStyle="inset", borderWidth=1, forceBorder=True,
         fontName="Helvetica", fontSize=10,
         fieldFlags=FF_MULTILINE,
-        maxlen=MAXLEN_MUY_GRANDE   # ⬅️ SIN LÍMITE PRÁCTICO
+        maxlen=MAXLEN_MUY_GRANDE
     )
     return y_text-(alto+1.4*cm)
 
-# ⬇️ Esta página empieza con salto para no superponerse con la última acción
+# Página final con el periodo
 def trimestre_page(c: canvas.Canvas, page: int, total: int):
-    """Página final con campo editable para indicar a qué trimestre(s) corresponde el informe."""
-    c.showPage()                 # Forzar página nueva ANTES de dibujar el bloque
+    c.showPage()
     header(c, page, total)
     x = 1.4*cm; w = A4[0]-2.8*cm; y = A4[1]-3.6*cm
 
@@ -368,10 +363,9 @@ def trimestre_page(c: canvas.Canvas, page: int, total: int):
         borderStyle="inset", borderWidth=1, forceBorder=True,
         fontName="Helvetica", fontSize=11,
         fieldFlags=FF_MULTILINE,
-        maxlen=MAXLEN_MUY_GRANDE   # ⬅️ SIN LÍMITE PRÁCTICO
+        maxlen=MAXLEN_MUY_GRANDE
     )
     footer(c)
-    # (no showPage aquí)
 
 def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], canton: str) -> bytes:
     buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=A4)
@@ -383,7 +377,6 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], 
         probs_order = list(dict.fromkeys(rows["problematica"].fillna("").tolist()))
         groups = [(p, rows[rows["problematica"] == p]) for p in probs_order]
 
-    # +1 por la página final de "Periodo del informe"
     total = 1 + max(1, len(groups)) + 1
     page = 0
     unique_field_counter = 0
@@ -410,7 +403,6 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], 
             y = wrap_text(c, lin or "", x+0.2*cm, y, w-0.4*cm)
             y -= 0.3*cm
 
-            # Numeración simple por línea
             num_simple = 1
             for _, fila in gdf.iterrows():
                 y, page = ensure_space(c, y, 7.0*cm, page, total)
@@ -421,7 +413,6 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], 
 
         footer(c)
 
-    # Página final: periodo de informe (trimestre/s)
     page += 1
     trimestre_page(c, page, total)
 
@@ -440,7 +431,7 @@ if not excel_file:
     st.info("Cargá el Excel para comenzar.")
     st.stop()
 
-# Nombre del cantón desde el nombre del archivo (usa el segmento a la izquierda del ' - ' o antes de '  ESS')
+# Cantón desde nombre de archivo
 canton_name = guess_canton_from_filename(excel_file.name)
 
 xls = pd.ExcelFile(excel_file, engine="openpyxl")
@@ -449,15 +440,30 @@ if modo == "Elegir una":
     hoja = st.selectbox("Hoja", xls.sheet_names)
     regs = parse_sheet(pd.read_excel(excel_file, sheet_name=hoja, header=None, engine="openpyxl"), hoja)
 else:
-    regs = pd.concat([parse_sheet(pd.read_excel(excel_file, sheet_name=s, header=None, engine="openpyxl"), s)
-                     for s in xls.sheet_names], ignore_index=True)
+    regs = pd.concat(
+        [parse_sheet(pd.read_excel(excel_file, sheet_name=s, header=None, engine="openpyxl"), s)
+         for s in xls.sheet_names],
+        ignore_index=True
+    )
 
 st.caption(f"Filas detectadas: **{len(regs)}**")
 
-# 🔒 Filtro ACTUALIZADO — si al menos un indicador de la misma ACCIÓN tiene líder municipal,
-# entonces TODA la acción pasa el filtro (se conservan todas sus subfilas)
-mask = regs.groupby("accion_estrategica")["lider"].transform(lambda col: any(es_muni(v) for v in col))
-regs_muni = regs[mask].reset_index(drop=True)
+# ===== Clave canónica de Acción (para agrupar correctamente aunque cambie numeración o espacios)
+def _accion_key(s: str) -> str:
+    s = str(s or "")
+    s = re.sub(r"^\s*\d+[\)\.\-]*\s*", "", s, flags=re.UNICODE)  # quita "1) " / "2. " / "3- "
+    s = re.sub(r"\s+", " ", s, flags=re.UNICODE)                 # colapsa espacios
+    return s.strip().lower()
+
+regs = regs.copy()
+regs["accion_key"] = regs["accion_estrategica"].apply(_accion_key)
+
+# 🔒 Filtro por ACCIÓN: si alguna subfila tiene líder municipal, TODA la acción pasa
+mask_por_accion = regs.groupby("accion_key")["lider"].transform(lambda col: any(es_muni(v) for v in col))
+regs_muni = regs[mask_por_accion].copy().reset_index(drop=True)
+
+# Forzar la visualización del líder como "Municipalidad" dentro de acciones aprobadas
+regs_muni["lider"] = regs_muni["lider"].apply(lambda v: v if es_muni(v) else "Municipalidad")
 
 st.caption(f"Filas después del filtro (acciones con al menos un líder municipal): **{len(regs_muni)}**")
 
@@ -468,6 +474,11 @@ st.dataframe(regs_muni[cols], use_container_width=True)
 if st.button("Generar PDF editable"):
     pdf = build_pdf_grouped_by_problem(regs_muni, cover_path, canton_name)
     st.success("PDF generado.")
-    st.download_button("⬇️ Descargar PDF", data=pdf, file_name=f"Informe_Seguimiento_GobiernoLocal_{canton_name or 'PDF'}.pdf", mime="application/pdf")
+    st.download_button(
+        "⬇️ Descargar PDF",
+        data=pdf,
+        file_name=f"Informe_Seguimiento_GobiernoLocal_{canton_name or 'PDF'}.pdf",
+        mime="application/pdf"
+    )
 
 
