@@ -168,7 +168,7 @@ def parse_sheet(df_raw: pd.DataFrame, sheet_name: str) -> pd.DataFrame:
                 lid  = get(hdr.get("lider"))
                 cog  = get(hdr.get("cogestores"))
 
-                # ⬇️ CAMBIO: filas sep./vacías dentro del bloque -> saltar, NO terminar
+                # ⬇️ CAMBIO 1: filas totalmente vacías dentro del bloque -> saltar, NO terminar
                 if not any([acc, ind, meta, lid, cog]):
                     i += 1
                     continue
@@ -232,16 +232,20 @@ def guess_canton_from_filename(filename: str) -> str:
     """
     base = Path(filename).stem.strip()
 
+    # 1) Prioridad: dos espacios + 'ESS' (insensible a mayúsculas)
     m = re.split(r"\s{2,}ESS\b", base, flags=re.IGNORECASE)
     if len(m) >= 2:
         left = m[0].strip().replace("_", " ")
+        # Capitalizar respetando tildes; mantener siglas si vienen en MAYÚSCULAS
         return " ".join(w.capitalize() if not re.match(r"^[A-ZÁÉÍÓÚÑ]{2,}$", w) else w for w in left.split())
 
+    # 2) Regla anterior: usar el segmento a la izquierda de ' - ' si existe
     base2 = base.replace("_", " ")
     if " - " in base2:
         left = base2.split(" - ")[0].strip()
         return " ".join(s.capitalize() for s in left.split())
 
+    # 3) Fallback: limpiar palabras comunes y tomar primer token “alfabético”
     seg = re.sub(r"\[.*?\]", "", base2, flags=re.U)
     seg = re.sub(r"(?i)\b(matriz|cadena|resultados|lineas|líneas|accion|acción|version|versi[oó]n|final|modificado|oficial|vista|protegida|d\d+)\b", "", seg)
     tokens = [t for t in seg.split() if re.match(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", t)]
@@ -341,13 +345,14 @@ def ficha_accion(c, x, y, w, idx, fila, field_name: str) -> float:
         borderStyle="inset", borderWidth=1, forceBorder=True,
         fontName="Helvetica", fontSize=10,
         fieldFlags=FF_MULTILINE,
-        maxlen=MAXLEN_MUY_GRANDE
+        maxlen=MAXLEN_MUY_GRANDE   # ⬅️ SIN LÍMITE PRÁCTICO
     )
     return y_text-(alto+1.4*cm)
 
-# Página final con periodo
+# ⬇️ Esta página empieza con salto para no superponerse con la última acción
 def trimestre_page(c: canvas.Canvas, page: int, total: int):
-    c.showPage()
+    """Página final con campo editable para indicar a qué trimestre(s) corresponde el informe."""
+    c.showPage()                 # Forzar página nueva ANTES de dibujar el bloque
     header(c, page, total)
     x = 1.4*cm; w = A4[0]-2.8*cm; y = A4[1]-3.6*cm
 
@@ -366,9 +371,10 @@ def trimestre_page(c: canvas.Canvas, page: int, total: int):
         borderStyle="inset", borderWidth=1, forceBorder=True,
         fontName="Helvetica", fontSize=11,
         fieldFlags=FF_MULTILINE,
-        maxlen=MAXLEN_MUY_GRANDE
+        maxlen=MAXLEN_MUY_GRANDE   # ⬅️ SIN LÍMITE PRÁCTICO
     )
     footer(c)
+    # (no showPage aquí)
 
 def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], canton: str) -> bytes:
     buf = io.BytesIO(); c = canvas.Canvas(buf, pagesize=A4)
@@ -380,6 +386,7 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], 
         probs_order = list(dict.fromkeys(rows["problematica"].fillna("").tolist()))
         groups = [(p, rows[rows["problematica"] == p]) for p in probs_order]
 
+    # +1 por la página final de "Periodo del informe"
     total = 1 + max(1, len(groups)) + 1
     page = 0
     unique_field_counter = 0
@@ -406,6 +413,7 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], 
             y = wrap_text(c, lin or "", x+0.2*cm, y, w-0.4*cm)
             y -= 0.3*cm
 
+            # Numeración simple por línea
             num_simple = 1
             for _, fila in gdf.iterrows():
                 y, page = ensure_space(c, y, 7.0*cm, page, total)
@@ -416,6 +424,7 @@ def build_pdf_grouped_by_problem(rows: pd.DataFrame, image_path: Optional[str], 
 
         footer(c)
 
+    # Página final: periodo de informe (trimestre/s)
     page += 1
     trimestre_page(c, page, total)
 
@@ -434,7 +443,7 @@ if not excel_file:
     st.info("Cargá el Excel para comenzar.")
     st.stop()
 
-# Nombre del cantón desde el nombre del archivo
+# Nombre del cantón desde el nombre del archivo (usa el segmento a la izquierda del ' - ' o antes de '  ESS')
 canton_name = guess_canton_from_filename(excel_file.name)
 
 xls = pd.ExcelFile(excel_file, engine="openpyxl")
@@ -448,9 +457,9 @@ else:
 
 st.caption(f"Filas detectadas: **{len(regs)}**")
 
-# ===== Clave canónica para agrupar acciones =====
+# ===== Clave canónica de Acción (para agrupar aunque cambie numeración/espacios/tildes)
 def _accion_key(s: str) -> str:
-    # normaliza NBSP y tildes, quita numeración/puntuación inicial y colapsa espacios
+    # ⬇️ CAMBIO 2: normaliza NBSP y tildes, quita numeración inicial y colapsa espacios
     s = unicodedata.normalize("NFKD", str(s or "")).replace("\u00A0", " ")
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
     s = re.sub(r"^\s*\d+[\)\.\-]*\s*", "", s, flags=re.UNICODE)
@@ -460,57 +469,12 @@ def _accion_key(s: str) -> str:
 regs = regs.copy()
 regs["accion_key"] = regs["accion_estrategica"].apply(_accion_key)
 
-# Filtro por ACCIÓN: si alguna subfila tiene líder municipal, TODA la acción pasa
+# 🔒 Filtro por ACCIÓN: si alguna subfila tiene líder municipal, TODA la acción pasa
 mask_por_accion = regs.groupby("accion_key")["lider"].transform(lambda col: any(es_muni(v) for v in col))
 regs_muni = regs[mask_por_accion].copy().reset_index(drop=True)
 
-# ==== Normalización de roles (swap inteligente) ====
-def _split_clean_list(text: str) -> List[str]:
-    parts = [p.strip() for p in ITEM_SEP_REGEX.split(str(text or "")) if p and p.strip()]
-    seen = set(); out = []
-    for p in parts:
-        k = _norm(p)
-        if k not in seen:
-            seen.add(k); out.append(p)
-    return out
-
-def _join_list(parts: List[str]) -> str:
-    return "; ".join([p for p in parts if p])
-
-def _has_muni_in_list(parts: List[str]) -> bool:
-    return any(es_muni(p) for p in parts)
-
-def _normalize_roles(row: pd.Series) -> pd.Series:
-    lider = str(row.get("lider", "") or "")
-    cog   = str(row.get("cogestores", "") or "")
-    cog_list = _split_clean_list(cog)
-    lider_is_muni = es_muni(lider)
-    cog_has_muni  = _has_muni_in_list(cog_list)
-
-    if lider_is_muni:
-        # Mantener "Municipalidad" como líder y quitarlo de co-gestores
-        cog_list = [p for p in cog_list if not es_muni(p)]
-        row["lider"] = "Municipalidad"
-        row["cogestores"] = _join_list(cog_list)
-        return row
-
-    if cog_has_muni:
-        # Swap: Municipalidad pasa a líder, líder original baja a co-gestores (sin duplicados)
-        cog_list = [p for p in cog_list if not es_muni(p)]
-        if lider and _norm(lider) not in {_norm(p) for p in cog_list}:
-            cog_list.append(lider)
-        row["lider"] = "Municipalidad"
-        row["cogestores"] = _join_list(cog_list)
-        return row
-
-    # No había Municipalidad → promovemos y conservamos el líder original en co-gestores
-    if lider and _norm(lider) not in {_norm(p) for p in cog_list}:
-        cog_list.append(lider)
-    row["lider"] = "Municipalidad"
-    row["cogestores"] = _join_list(cog_list)
-    return row
-
-regs_muni = regs_muni.apply(_normalize_roles, axis=1)
+# Forzar la visualización del líder como "Municipalidad" dentro de acciones aprobadas
+regs_muni["lider"] = regs_muni["lider"].apply(lambda v: v if es_muni(v) else "Municipalidad")
 
 st.caption(f"Filas después del filtro (acciones con al menos un líder municipal): **{len(regs_muni)}**")
 
@@ -521,9 +485,7 @@ st.dataframe(regs_muni[cols], use_container_width=True)
 if st.button("Generar PDF editable"):
     pdf = build_pdf_grouped_by_problem(regs_muni, cover_path, canton_name)
     st.success("PDF generado.")
-    st.download_button("⬇️ Descargar PDF",
-                       data=pdf,
-                       file_name=f"Informe_Seguimiento_GobiernoLocal_{canton_name or 'PDF'}.pdf",
-                       mime="application/pdf")
+    st.download_button("⬇️ Descargar PDF", data=pdf, file_name=f"Informe_Seguimiento_GobiernoLocal_{canton_name or 'PDF'}.pdf", mime="application/pdf")
+
 
 
